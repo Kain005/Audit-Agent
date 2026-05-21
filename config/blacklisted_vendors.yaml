@@ -1,0 +1,9 @@
+# Blacklisted vendors list.
+# Add one item per vendor using the structure below.
+# - name: "Vendor Legal Name"
+#   gstin: "27ABCDE1234F1Z5"
+#   reason: "Fraud investigation"
+#   added_date: "2026-04-27"
+#
+# Root structure is a list of objects: [{name, gstin, reason, added_date}]
+[]

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-audit-agent"
+version = "0.1.0"
+description = "Finance Audit Agent project scaffold"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pdfplumber",
+  "pdfminer.six",
+  "pytesseract",
+  "openpyxl",
+  "pandas",
+  "spacy==3.7.2",
+  "dateparser",
+  "langgraph",
+  "langchain",
+  "langchain-community",
+  "chromadb",
+  "sentence-transformers",
+  "scikit-learn",
+  "scipy",
+  "pyyaml",
+  "fastapi",
+  "uvicorn",
+  "streamlit",
+  "plotly",
+  "streamlit-aggrid",
+  "sqlalchemy",
+  "python-dotenv",
+  "jinja2",
+  "pytest",
+  "pytest-cov",
+  "requests",
+  "pillow",
+  "reportlab"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
