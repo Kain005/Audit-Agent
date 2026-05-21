@@ -1,14 +1,14 @@
-# Finance Audit Agent
+# Audit-Agent
 
-AI-powered financial document auditor for Indian businesses. Detects anomalies, flags policy violations, explains suspicious transactions in plain English.
+AI-powered financial document auditor for Indian businesses. Detects anomalies, flags policy violations, and explains suspicious transactions in plain English.
 
 ## Quick Start
-1. Clone repo
-2. pip install -r requirements.txt
-3. Download Ollama from ollama.com/download/windows
-4. ollama pull llama3.1:8b
-5. Double-click run.bat
-6. Open http://localhost:8501
+1. Clone the repo.
+2. Install dependencies with `pip install -r requirements.txt`.
+3. Download Ollama from `ollama.com/download/windows`.
+4. Pull the model with `ollama pull llama3.1:8b`.
+5. Run `run.bat`.
+6. Open `http://localhost:8501`.
 
 ## Supported Banks
 HDFC, ICICI, SBI, PNB, Axis Bank, Kotak, Yes Bank
