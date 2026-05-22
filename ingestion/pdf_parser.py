@@ -6,6 +6,7 @@ import os
 import re
 import logging
 from pathlib import Path
+from datetime import datetime
 from typing import Any
 
 import cv2
@@ -19,7 +20,7 @@ import easyocr
 import pytesseract
 
 from .parsers.normalizers import clean_amount, clean_date
-from .table_extractor import extract_table_cells
+from .table_extractor import extract_table_cells, segment_rows_by_density
 
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,299 @@ def get_ocr_engine():
     return _ocr_engine
 
 
-def _render_page_bgr(pdfium_page: Any) -> np.ndarray:
-    bitmap = pdfium_page.render(scale=2)
+def detect_pdf_type_and_scale(file_path: str) -> tuple[str, int]:
+    """Classify a PDF as native text or image-based before rendering."""
+    total_chars = 0
+    with pdfplumber.open(str(Path(file_path))) as pdf:
+        for page in pdf.pages[:3]:
+            total_chars += len((page.extract_text() or "").strip())
+
+    if total_chars > 100:
+        return "native_text", 2
+    return "image_pdf", 4
+
+
+def build_column_ranges(header_strip: np.ndarray, page_width: int) -> list[dict[str, int | str]]:
+    """Detect column ranges from a header strip using EasyOCR header keywords."""
+    if header_strip is None or getattr(header_strip, "size", 0) == 0 or page_width <= 0:
+        return []
+
+    keyword_map = {
+        "date": "date",
+        "value date": "value date",
+        "narration": "narration",
+        "particulars": "particulars",
+        "description": "description",
+        "withdrawal": "withdrawal",
+        "withdrawl": "withdrawl",
+        "debit": "debit",
+        "deposit": "deposit",
+        "credit": "credit",
+        "balance": "balance",
+        "dr": "dr",
+        "cr": "cr",
+        "ref": "ref",
+        "chq": "chq",
+        "cheque": "cheque",
+    }
+
+    ocr = get_ocr_engine()
+    result = ocr.readtext(header_strip)
+
+    detected_words: list[dict[str, int | str]] = []
+    for item in result or []:
+        try:
+            box, text = item[0], str(item[1] or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            left_x = int(round(min(point[0] for point in box)))
+            right_x = int(round(max(point[0] for point in box)))
+        except Exception:
+            continue
+        normalized_text = re.sub(r"\s+", " ", text.lower()).strip()
+        if normalized_text in keyword_map:
+            detected_words.append({"text": keyword_map[normalized_text], "x_start": left_x, "x_end": right_x})
+
+    detected_words.sort(key=lambda item: int(item["x_start"]))
+
+    if len(detected_words) < 3:
+        return []
+
+    column_ranges: list[dict[str, int | str]] = []
+    for index, word in enumerate(detected_words):
+        next_x = int(detected_words[index + 1]["x_start"]) if index + 1 < len(detected_words) else page_width
+        column_ranges.append({
+            "name": str(word["text"]),
+            "x_start": int(word["x_start"]),
+            "x_end": int(next_x),
+        })
+
+    if len(column_ranges) < 3:
+        return []
+
+    return column_ranges
+
+
+def map_row_to_columns(
+    row_strip: np.ndarray,
+    column_ranges: list[dict[str, int | str]],
+    page_width: int,
+) -> dict[str, str]:
+    """Map OCR words in a row strip to detected column ranges."""
+    if row_strip is None or getattr(row_strip, "size", 0) == 0 or not column_ranges or page_width <= 0:
+        return {str(column.get("name", "")): "" for column in column_ranges}
+
+    ocr = get_ocr_engine()
+    result = ocr.readtext(row_strip)
+
+    normalized_columns: list[dict[str, int | str | float]] = []
+    for column in column_ranges:
+        name = str(column.get("name", ""))
+        x_start = int(column.get("x_start", 0) or 0)
+        x_end = int(column.get("x_end", page_width) or page_width)
+        midpoint = (x_start + x_end) / 2.0
+        normalized_columns.append({"name": name, "x_start": x_start, "x_end": x_end, "midpoint": midpoint})
+
+    if not normalized_columns:
+        return {}
+
+    assigned_words: dict[str, list[tuple[float, str]]] = {str(column["name"]): [] for column in normalized_columns}
+
+    detected_words: list[tuple[float, float, str]] = []
+    for item in result or []:
+        try:
+            box, text = item[0], str(item[1] or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            left_x = float(min(point[0] for point in box))
+            right_x = float(max(point[0] for point in box))
+            center_x = (left_x + right_x) / 2.0
+        except Exception:
+            continue
+        detected_words.append((left_x, center_x, text))
+
+    detected_words.sort(key=lambda item: item[0])
+
+    for _, center_x, text in detected_words:
+        matched_index: int | None = None
+        for index, column in enumerate(normalized_columns):
+            x_start = float(column["x_start"])
+            x_end = float(column["x_end"])
+            if x_start <= center_x < x_end:
+                matched_index = index
+                break
+
+        if matched_index is None:
+            nearest_index = 0
+            nearest_distance = abs(center_x - float(normalized_columns[0]["midpoint"]))
+            for index, column in enumerate(normalized_columns[1:], start=1):
+                distance = abs(center_x - float(column["midpoint"]))
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_index = index
+            matched_index = nearest_index
+
+        column_name = str(normalized_columns[matched_index]["name"])
+        assigned_words[column_name].append((center_x, text))
+
+    return {
+        str(column["name"]): " ".join(text for _, text in sorted(assigned_words[str(column["name"])] , key=lambda item: item[0])).strip()
+        for column in normalized_columns
+    }
+
+
+def _serialize_row_dicts_as_tab_text(row_dicts: list[dict[str, str]], column_ranges: list[dict[str, int | str]]) -> str:
+    column_names = [str(column.get("name", "")).strip() for column in column_ranges if str(column.get("name", "")).strip()]
+    if not column_names:
+        return ""
+
+    lines = ["\t".join(column_names)]
+    for row in row_dicts:
+        lines.append("\t".join(str(row.get(column_name, "") or "").strip() for column_name in column_names))
+    return "\n".join(lines).strip()
+
+
+def validate_column_consistency(
+    row_dicts: list[dict[str, str]],
+    column_ranges: list[dict[str, int | str]],
+) -> dict[str, float]:
+    """Validate mapped rows for date, numeric, and balance consistency."""
+    column_names = [str(column.get("name", "")).strip().lower() for column in column_ranges]
+
+    date_values: list[str] = []
+    numeric_values: list[str] = []
+    balance_values: list[float] = []
+    debit_column_names = {"debit", "withdrawal", "withdrawl"}
+    credit_column_names = {"credit", "deposit"}
+    numeric_column_names = debit_column_names | credit_column_names | {"balance"}
+
+    for row in row_dicts:
+        for column in column_names:
+            value = str(row.get(column, "") or "").strip()
+            if not value:
+                continue
+            if column == "date":
+                date_values.append(value)
+            if column in numeric_column_names:
+                numeric_values.append(value)
+                if column == "balance":
+                    cleaned_balance = re.sub(r"[,$₹$€£]", "", value)
+                    cleaned_balance = re.sub(r"\s+", "", cleaned_balance)
+                    try:
+                        balance_values.append(float(cleaned_balance))
+                    except (TypeError, ValueError):
+                        continue
+
+    date_formats = ["%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%d %b %Y", "%Y-%m-%d"]
+    successful_dates = 0
+    for value in date_values:
+        parsed = False
+        for date_format in date_formats:
+            try:
+                datetime.strptime(value, date_format)
+                parsed = True
+                break
+            except ValueError:
+                continue
+        if parsed:
+            successful_dates += 1
+
+    date_confidence = successful_dates / len(date_values) if date_values else 0.0
+
+    successful_numeric = 0
+    parsed_balances: list[float] = []
+    for row in row_dicts:
+        for column in column_names:
+            if column not in numeric_column_names:
+                continue
+            value = str(row.get(column, "") or "").strip()
+            if not value:
+                continue
+            cleaned_value = re.sub(r"[,$₹$€£]", "", value)
+            cleaned_value = re.sub(r"\s+", "", cleaned_value)
+            try:
+                numeric_value = float(cleaned_value)
+            except (TypeError, ValueError):
+                continue
+            successful_numeric += 1
+            if column == "balance":
+                parsed_balances.append(numeric_value)
+
+    numeric_confidence = successful_numeric / len(numeric_values) if numeric_values else 0.0
+
+    balance_confidence = 0.0
+    if numeric_confidence > 0.7 and parsed_balances and len(parsed_balances) > 1:
+        balance_column_name = next((name for name in column_names if name == "balance"), None)
+        if balance_column_name is not None:
+            checked_rows = 0
+            reconciling_rows = 0
+            mean_balance = float(np.mean(parsed_balances)) if parsed_balances else 0.0
+            tolerance = abs(mean_balance) * 0.01
+            previous_balance: float | None = None
+
+            for row in row_dicts:
+                balance_value = str(row.get(balance_column_name, "") or "").strip()
+                if not balance_value:
+                    continue
+
+                cleaned_balance = re.sub(r"[,$₹$€£]", "", balance_value)
+                cleaned_balance = re.sub(r"\s+", "", cleaned_balance)
+                try:
+                    current_balance = float(cleaned_balance)
+                except (TypeError, ValueError):
+                    continue
+
+                debit_value = 0.0
+                credit_value = 0.0
+                for debit_column in debit_column_names:
+                    cleaned_debit = re.sub(r"[,$₹$€£]", "", str(row.get(debit_column, "") or ""))
+                    cleaned_debit = re.sub(r"\s+", "", cleaned_debit)
+                    try:
+                        debit_value += float(cleaned_debit) if cleaned_debit else 0.0
+                    except (TypeError, ValueError):
+                        continue
+                for credit_column in credit_column_names:
+                    cleaned_credit = re.sub(r"[,$₹$€£]", "", str(row.get(credit_column, "") or ""))
+                    cleaned_credit = re.sub(r"\s+", "", cleaned_credit)
+                    try:
+                        credit_value += float(cleaned_credit) if cleaned_credit else 0.0
+                    except (TypeError, ValueError):
+                        continue
+
+                checked_rows += 1
+                if previous_balance is None:
+                    previous_balance = current_balance
+                    continue
+
+                expected_balance = previous_balance - debit_value + credit_value
+                if abs(current_balance - expected_balance) <= tolerance:
+                    reconciling_rows += 1
+                previous_balance = current_balance
+
+            balance_confidence = reconciling_rows / checked_rows if checked_rows else 0.0
+
+    overall_confidence = (
+        date_confidence * 0.25
+        + numeric_confidence * 0.25
+        + balance_confidence * 0.5
+    )
+
+    return {
+        "date_confidence": date_confidence,
+        "numeric_confidence": numeric_confidence,
+        "balance_confidence": balance_confidence,
+        "overall_confidence": overall_confidence,
+    }
+
+
+def _render_page_bgr(pdfium_page: Any, render_scale: int) -> np.ndarray:
+    bitmap = pdfium_page.render(scale=render_scale)
     rgba_array = np.array(bitmap.to_pil().convert("RGBA"))
     return cv2.cvtColor(rgba_array, cv2.COLOR_RGBA2BGR)
 
@@ -126,6 +418,7 @@ def _prepare_ocr_image(page: Any, scale: int) -> Any:
 
 def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
     pages_output: list[dict[str, Any]] = []
+    pdf_type, render_scale = detect_pdf_type_and_scale(file_path)
 
     with pdfplumber.open(str(Path(file_path))) as pdf:
         if len(pdf.pages) > 10:
@@ -144,15 +437,21 @@ def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
                         "confidence": 100,
                         "low_confidence": False,
                         "source": "pdfplumber",
+                        "pdf_type": pdf_type,
+                        "render_scale": render_scale,
                     })
                     continue
 
                 try:
                     pdfium_page = pdfium_pdf[index]
-                    bgr_array = _render_page_bgr(pdfium_page)
+                    bgr_array = _render_page_bgr(pdfium_page, render_scale)
 
                     ocr = get_ocr_engine()
                     table_rows = extract_table_cells(bgr_array)
+                    raw_text = ""
+                    mean_confidence = 0.0
+                    confidence_validated = False
+                    density_fallback_used = False
 
                     if table_rows:
                         row_texts: list[str] = []
@@ -171,10 +470,32 @@ def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
 
                         raw_text = "\n".join(row_texts).strip()
                         mean_confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
-                    else:
+                    if raw_text and pdf_type == "image_pdf" and len(raw_text) < 100:
+                        raw_text = ""
+                        mean_confidence = 0.0
+
+                    if not raw_text and pdf_type == "image_pdf":
+                        density_strips = segment_rows_by_density(bgr_array)
+                        if density_strips:
+                            strip_texts: list[str] = []
+                            strip_confidences: list[float] = []
+                            for strip in density_strips:
+                                cell_result = ocr.readtext(strip)
+                                strip_text, strip_confidence = _read_easyocr_lines(cell_result)
+                                if strip_text:
+                                    strip_texts.append(strip_text)
+                                if strip_confidence > 0:
+                                    strip_confidences.append(strip_confidence)
+
+                            raw_text = "\n".join(strip_texts).strip()
+                            mean_confidence = round(sum(strip_confidences) / len(strip_confidences), 4) if strip_confidences else 0.0
+                            density_fallback_used = True
+
+                    if not raw_text:
                         result = ocr.readtext(bgr_array)
                         raw_text, mean_confidence = _read_easyocr_lines(result)
 
+                    low_confidence = True if density_fallback_used else mean_confidence < 0.7
                     if not raw_text:
                         pages_output.append({
                             "page_number": page_number,
@@ -182,16 +503,23 @@ def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
                             "confidence": 0.0,
                             "low_confidence": True,
                             "source": "easyocr",
+                            "pdf_type": pdf_type,
+                            "render_scale": render_scale,
                         })
                         continue
 
-                    pages_output.append({
+                    page_output = {
                         "page_number": page_number,
                         "raw_text": raw_text,
                         "confidence": mean_confidence,
-                        "low_confidence": mean_confidence < 0.7,
+                        "low_confidence": low_confidence,
                         "source": "easyocr",
-                    })
+                        "pdf_type": pdf_type,
+                        "render_scale": render_scale,
+                    }
+                    if confidence_validated:
+                        page_output["confidence_validated"] = True
+                    pages_output.append(page_output)
 
                 except Exception as exc:
                     logger.warning("EasyOCR failed for page %s in %s: %s", page_number, file_path, exc)
@@ -201,6 +529,8 @@ def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
                         "confidence": 0.0,
                         "low_confidence": True,
                         "source": "easyocr",
+                        "pdf_type": pdf_type,
+                        "render_scale": render_scale,
                     })
         finally:
             pdfium_pdf.close()

@@ -789,7 +789,7 @@ def page_upload():
                         return
 
                     final_status = None
-                    for _ in range(60):
+                    for _ in range(180):
                         current_status = api_call(f"/status/{job_id.strip()}", method="GET")
                         if not current_status:
                             status.update(label="❌ Status check failed", state="error")
@@ -799,7 +799,7 @@ def page_upload():
                         final_status = str(current_status.get("status", "")).lower()
                         if final_status in {"complete", "failed"}:
                             break
-                        time.sleep(1)
+                        time.sleep(2)
 
                     if final_status != "complete":
                         status.update(label="❌ Audit failed", state="error")

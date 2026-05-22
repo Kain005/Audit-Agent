@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 
 from .bank_layouts.hdfc_layout import HDFCLayoutParser
 from .bank_layouts.sbi_layout import SBILayoutParser
 from .bank_statement_parser import BankStatementParser
-from .pdf_parser import PDFParser as _PDFParser
+from .pdf_parser import extract_text_by_page as extract_pages_as_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +22,7 @@ _LAYOUT_PARSERS: dict[str, Any] = {
     "sbi": SBILayoutParser,
 }
 
-
-def extract_text_by_page(path: str) -> list[str]:
-    result = _PDFParser().parse(path)
-    raw = result.get("raw_text") or ""
-    return raw.split("\f") if "\f" in raw else [raw]
-
-
-def _detect_bank_from_ocr(pages: list[str]) -> str:
+def _detect_bank_from_ocr(pages: list[dict[str, Any]]) -> str:
     """
     Identify the bank from combined OCR page text.
 
@@ -37,7 +30,7 @@ def _detect_bank_from_ocr(pages: list[str]) -> str:
     keyword signatures for SBI, HDFC, ICICI, Axis, Kotak, PNB, Yes Bank.
     Passing an empty DataFrame forces the text-only path.
     """
-    combined = "\n".join(pages)
+    combined = "\n".join(str(page.get("raw_text", "") or "") for page in pages)
     return _bsp.detect_bank(pd.DataFrame(), raw_text=combined)
 
 
@@ -53,19 +46,19 @@ def parse_bank_pdf(pdf_path: str) -> dict:
       4. Return detected bank + raw_text so document_router can run regex
          extraction as a last resort (Bug 1 fix hook)
     """
-    pages = extract_text_by_page(pdf_path)
-    combined_text = "\n".join(pages)
+    pages_full = extract_pages_as_dicts(pdf_path)
+    combined_text = "\n".join(str(page.get("raw_text", "") or "") for page in pages_full)
 
     # Step 1: text-based bank detection
-    detected_bank = _detect_bank_from_ocr(pages)
+    detected_bank = _detect_bank_from_ocr(pages_full)
     logger.info("OCR bank detection: '%s' for %s", detected_bank, pdf_path)
 
     # Step 2: run the matching layout parser first
     if detected_bank in _LAYOUT_PARSERS:
         layout_cls = _LAYOUT_PARSERS[detected_bank]
         try:
-            if layout_cls.detect(pages):
-                parsed = layout_cls.extract(pages)
+            if layout_cls.detect(pages_full):
+                parsed = layout_cls.extract(pages_full)
                 parsed["parser_used"] = detected_bank.upper()
                 parsed.setdefault("bank", detected_bank)
                 logger.info("Layout parser '%s' succeeded", detected_bank)
@@ -78,8 +71,8 @@ def parse_bank_pdf(pdf_path: str) -> dict:
         if bank_key == detected_bank:
             continue  # already tried
         try:
-            if layout_cls.detect(pages):
-                parsed = layout_cls.extract(pages)
+            if layout_cls.detect(pages_full):
+                parsed = layout_cls.extract(pages_full)
                 parsed["parser_used"] = bank_key.upper()
                 parsed.setdefault("bank", bank_key)
                 logger.info("Fallback layout parser '%s' succeeded", bank_key)
@@ -100,6 +93,7 @@ def parse_bank_pdf(pdf_path: str) -> dict:
         "bank": detected_bank,
         "transactions": [],
         "raw_text": combined_text,
+        "pages_full": pages_full,
         "parse_warnings": [
             f"No layout parser matched. Bank identified as '{detected_bank}' "
             "via OCR keywords. Regex fallback will be attempted."

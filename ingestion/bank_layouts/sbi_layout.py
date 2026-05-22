@@ -12,7 +12,7 @@ class SBILayoutParser:
     """
 
     # Allow OCR O/0 confusion in day/year positions
-    DATE_RE = re.compile(r"^\s*([0-9O]{2}\s+[A-Za-z]{3}\s+[0-9O]{4})")
+    DATE_RE = re.compile(r"^\s*((?:[0-9O]{2}[-/][0-9O]{2}[-/][0-9O]{2,4})|(?:[0-9O]{2}\s+[A-Za-z]{3}\s+[0-9O]{4,}))")
     AMT_RE = re.compile(r"[0-9OBo,]+\.?\d*")
     ACCOUNT_RE = re.compile(r"Account\s*(?:No|Number|No\.|A/c)[:\s]*([A-Za-z0-9-]+)", re.IGNORECASE)
 
@@ -120,6 +120,12 @@ class SBILayoutParser:
                     raw_date = date_match.group(1)
                     date_str = cls._cleanup_date_token(raw_date)
                     rest = ln_clean[date_match.end():].strip()
+                    second_date_match = re.match(
+                        r"^([0-9O]{2}[-/][0-9O]{2}[-/][0-9O]{2,4}|[0-9O]{2}\s+[A-Za-z]{3}\s+[0-9O]{4,})",
+                        rest,
+                    )
+                    if second_date_match:
+                        rest = rest[second_date_match.end():].strip()
 
                     amt_tokens = re.findall(r"[0-9OBo,]+\.?\d*", ln_clean)
 
@@ -128,32 +134,81 @@ class SBILayoutParser:
                     balance = None
                     ref_no = None
 
+                    suffix_pattern = re.compile(r"([0-9OBo,]+(?:\.\d+)?)\s*(DR|CR)\b", re.IGNORECASE)
+                    standalone_pattern = re.compile(r"[0-9OBo,]+(?:\.\d+)?")
+
+                    standalone_amounts: List[float] = []
+                    for match in standalone_pattern.finditer(ln_clean):
+                        token = match.group(0)
+                        remainder = ln_clean[match.end():]
+                        if re.match(r"^\s*(?:DR|CR)\b", remainder, re.IGNORECASE):
+                            continue
+                        parsed_amount = cls._parse_amount(token)
+                        if parsed_amount is not None:
+                            standalone_amounts.append(parsed_amount)
+
+                    suffix_debit = None
+                    suffix_credit = None
+                    for match in suffix_pattern.finditer(ln_clean):
+                        parsed_amount = cls._parse_amount(match.group(1))
+                        if parsed_amount is None:
+                            continue
+                        suffix = match.group(2).upper()
+                        if suffix == "DR":
+                            suffix_debit = parsed_amount
+                        elif suffix == "CR":
+                            suffix_credit = parsed_amount
+
+                    if suffix_debit is not None:
+                        debit = suffix_debit
+                    if suffix_credit is not None:
+                        credit = suffix_credit
+                    if standalone_amounts:
+                        balance = standalone_amounts[-1]
+
                     if amt_tokens:
                         parsed_amts = [cls._parse_amount(t) for t in amt_tokens if cls._parse_amount(t) is not None]
                         if parsed_amts:
-                            # For both formats, balance is last
-                            if len(parsed_amts) >= 1:
+                            # Fallback positional parsing only when suffix parsing did not resolve fields
+                            if balance is None and len(parsed_amts) >= 1:
                                 balance = parsed_amts[-1]
-                            # Format A expected to have Debit, Credit before balance
-                            if sbi_format == "A":
-                                if len(parsed_amts) >= 3:
-                                    debit = parsed_amts[-3]
-                                    credit = parsed_amts[-2]
-                                elif len(parsed_amts) == 2:
-                                    debit = parsed_amts[-2]
-                            else:
-                                # Format B: may have Debit, Credit before balance or only Debit/Balance
-                                if len(parsed_amts) >= 3:
-                                    debit = parsed_amts[-3]
-                                    credit = parsed_amts[-2]
-                                elif len(parsed_amts) == 2:
-                                    # ambiguous: treat first as debit
-                                    debit = parsed_amts[0]
+                            if debit is None or credit is None:
+                                # Format A expected to have Debit, Credit before balance
+                                if sbi_format == "A":
+                                    if len(parsed_amts) >= 3:
+                                        if debit is None:
+                                            debit = parsed_amts[-3]
+                                        if credit is None:
+                                            credit = parsed_amts[-2]
+                                    elif len(parsed_amts) == 2 and debit is None:
+                                        debit = parsed_amts[-2]
+                                else:
+                                    # Format B: may have Debit, Credit before balance or only Debit/Balance
+                                    if len(parsed_amts) >= 3:
+                                        if debit is None:
+                                            debit = parsed_amts[-3]
+                                        if credit is None:
+                                            credit = parsed_amts[-2]
+                                    elif len(parsed_amts) == 2 and debit is None:
+                                        # ambiguous: treat first as debit
+                                        debit = parsed_amts[0]
 
                     # Remove amount substrings from rest to isolate description and possible ref
                     desc = rest
                     for amt in re.findall(r"[0-9OBo,]+\.?\d*", rest):
                         desc = desc.rsplit(amt, 1)[0].strip()
+
+                    def _is_ocr_mangled_token(token: str) -> bool:
+                        letters_only = re.sub(r"[^A-Za-z]", "", token)
+                        if len(letters_only) < 6:
+                            return False
+                        counts: Dict[str, int] = {}
+                        for ch in letters_only.lower():
+                            counts[ch] = counts.get(ch, 0) + 1
+                        return max(counts.values()) >= 5
+
+                    if desc:
+                        desc = " ".join(token for token in desc.split() if not _is_ocr_mangled_token(token)).strip()
 
                     # If Format A, try to extract ref_no as the first token of desc if it looks like a reference
                     if sbi_format == "A" and desc:
