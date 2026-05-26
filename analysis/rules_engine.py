@@ -560,6 +560,314 @@ class RulesEngine:
             amount_involved=None,
         )
 
+    def check_near_duplicate_invoice(self, invoice: InvoiceEntities, history: list[InvoiceEntities], days_window: int = 30) -> PolicyViolation | None:
+        current_number = (invoice.invoice_number or "").strip()
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        current_amount = float(invoice.total_amount or invoice.subtotal or 0.0)
+        current_date = self._parse_date(invoice.invoice_date)
+        if not current_number or not current_vendor:
+            return None
+        for old in history:
+            old_number = (old.invoice_number or "").strip()
+            old_vendor = (old.vendor_name or "").strip().lower()
+            if old_vendor != current_vendor or not old_number:
+                continue
+            if old_number == current_number:
+                continue
+            similarity = SequenceMatcher(None, current_number.lower(), old_number.lower()).ratio()
+            if similarity < 0.8:
+                continue
+            old_amount = float(old.total_amount or old.subtotal or 0.0)
+            amount_match = abs(current_amount - old_amount) <= max(1.0, 0.01 * max(current_amount, old_amount))
+            old_date = self._parse_date(old.invoice_date)
+            date_match = (
+                current_date is not None and old_date is not None
+                and abs((current_date - old_date).days) <= days_window
+            )
+            if amount_match and date_match:
+                return self._build_violation(
+                    rule_name="near_duplicate_invoice",
+                    severity="HIGH",
+                    description=f"Invoice '{current_number}' is near-duplicate of '{old_number}' for vendor '{invoice.vendor_name}' — similar number, same amount, within {days_window} days.",
+                    evidence={"invoice_number": current_number, "matched_invoice": old_number, "vendor": invoice.vendor_name, "amount": current_amount, "similarity": round(similarity, 3)},
+                    recommendation="Hold payment and verify whether this is a resubmission.",
+                    document_name=current_number,
+                    amount_involved=current_amount,
+                )
+        return None
+
+    def check_same_amount_vendor_duplicate(self, invoice: InvoiceEntities, history: list[InvoiceEntities]) -> PolicyViolation | None:
+        current_number = (invoice.invoice_number or "").strip()
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        current_amount = float(invoice.total_amount or invoice.subtotal or 0.0)
+        if not current_vendor or current_amount <= 0:
+            return None
+        for old in history:
+            old_number = (old.invoice_number or "").strip()
+            old_vendor = (old.vendor_name or "").strip().lower()
+            if old_vendor != current_vendor or old_number == current_number:
+                continue
+            old_amount = float(old.total_amount or old.subtotal or 0.0)
+            if abs(current_amount - old_amount) <= max(1.0, 0.01 * max(current_amount, old_amount)):
+                return self._build_violation(
+                    rule_name="same_amount_vendor_duplicate",
+                    severity="MEDIUM",
+                    description=f"Vendor '{invoice.vendor_name}' has two invoices with same amount {current_amount:.2f} but different numbers: '{current_number}' and '{old_number}'.",
+                    evidence={"invoice_number": current_number, "matched_invoice": old_number, "vendor": invoice.vendor_name, "amount": current_amount},
+                    recommendation="Verify both invoices represent distinct deliveries before payment.",
+                    document_name=current_number,
+                    amount_involved=current_amount,
+                )
+        return None
+
+    def check_gstin_name_mismatch(self, invoice: InvoiceEntities, history: list[InvoiceEntities]) -> PolicyViolation | None:
+        current_gstin = (invoice.vendor_gst or "").strip().upper()
+        current_name = (invoice.vendor_name or "").strip().lower()
+        if not current_gstin or not current_name:
+            return None
+        for old in history:
+            old_gstin = (old.vendor_gst or "").strip().upper()
+            old_name = (old.vendor_name or "").strip().lower()
+            if old_gstin != current_gstin or not old_name:
+                continue
+            similarity = SequenceMatcher(None, current_name, old_name).ratio()
+            if similarity < 0.85:
+                return self._build_violation(
+                    rule_name="gstin_name_mismatch",
+                    severity="HIGH",
+                    description=f"GSTIN '{current_gstin}' appears with different vendor names: '{invoice.vendor_name}' vs '{old.vendor_name}'.",
+                    evidence={"gstin": current_gstin, "name_1": invoice.vendor_name, "name_2": old.vendor_name, "similarity": round(similarity, 3)},
+                    recommendation="Verify GSTIN ownership — possible identity fraud or data error.",
+                    document_name=invoice.invoice_number or "invoice",
+                    amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+                )
+        return None
+
+    def check_vendor_sudden_activity(self, invoice: InvoiceEntities, history: list[InvoiceEntities], window_days: int = 30, min_invoices: int = 3) -> PolicyViolation | None:
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        if not current_vendor:
+            return None
+        current_date = self._parse_date(invoice.invoice_date)
+        if current_date is None:
+            return None
+        window_start = current_date - timedelta(days=window_days)
+        vendor_invoices = [
+            old for old in history
+            if (old.vendor_name or "").strip().lower() == current_vendor
+            and self._parse_date(old.invoice_date) is not None
+            and self._parse_date(old.invoice_date) >= window_start
+        ]
+        if len(vendor_invoices) + 1 >= min_invoices:
+            older_history = [
+                old for old in history
+                if (old.vendor_name or "").strip().lower() == current_vendor
+                and self._parse_date(old.invoice_date) is not None
+                and self._parse_date(old.invoice_date) < window_start
+            ]
+            if not older_history:
+                total = len(vendor_invoices) + 1
+                return self._build_violation(
+                    rule_name="vendor_sudden_activity",
+                    severity="MEDIUM",
+                    description=f"Vendor '{invoice.vendor_name}' has {total} invoices in {window_days} days with no prior history.",
+                    evidence={"vendor": invoice.vendor_name, "invoice_count": total, "window_days": window_days},
+                    recommendation="Perform vendor due diligence before processing further payments.",
+                    document_name=invoice.invoice_number or "invoice",
+                    amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+                )
+        return None
+
+    def check_one_time_vendor(self, invoice: InvoiceEntities, history: list[InvoiceEntities], high_value_threshold: float = 50000.0) -> PolicyViolation | None:
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        current_gstin = (invoice.vendor_gst or "").strip()
+        current_amount = float(invoice.total_amount or invoice.subtotal or 0.0)
+        if not current_vendor or current_amount <= high_value_threshold:
+            return None
+        prior = [old for old in history if (old.vendor_name or "").strip().lower() == current_vendor]
+        if prior:
+            return None
+        if current_gstin:
+            return None
+        return self._build_violation(
+            rule_name="one_time_vendor",
+            severity="HIGH",
+            description=f"Vendor '{invoice.vendor_name}' appears for the first time with high-value invoice {current_amount:.2f} and no GSTIN.",
+            evidence={"vendor": invoice.vendor_name, "amount": current_amount, "gstin": current_gstin or None, "threshold": high_value_threshold},
+            recommendation="Require vendor registration, GSTIN, and manager approval before payment.",
+            document_name=invoice.invoice_number or "invoice",
+            amount_involved=current_amount,
+        )
+
+    def check_frequency_anomaly(self, invoice: InvoiceEntities, history: list[InvoiceEntities], spike_multiplier: float = 3.0) -> PolicyViolation | None:
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        current_date = self._parse_date(invoice.invoice_date)
+        if not current_vendor or current_date is None:
+            return None
+        current_month = current_date.strftime("%Y-%m")
+        monthly_counts: dict[str, int] = defaultdict(int)
+        for old in history:
+            if (old.vendor_name or "").strip().lower() != current_vendor:
+                continue
+            old_date = self._parse_date(old.invoice_date)
+            if old_date is None:
+                continue
+            monthly_counts[old_date.strftime("%Y-%m")] += 1
+        monthly_counts[current_month] += 1
+        current_count = monthly_counts[current_month]
+        other_counts = [v for k, v in monthly_counts.items() if k != current_month]
+        if not other_counts:
+            return None
+        avg = sum(other_counts) / len(other_counts)
+        if avg > 0 and current_count >= spike_multiplier * avg:
+            return self._build_violation(
+                rule_name="invoice_frequency_anomaly",
+                severity="MEDIUM",
+                description=f"Vendor '{invoice.vendor_name}' has {current_count} invoices in {current_month} vs average {avg:.1f}/month — {spike_multiplier}x spike.",
+                evidence={"vendor": invoice.vendor_name, "current_month": current_month, "current_count": current_count, "historical_avg": round(avg, 2), "multiplier": spike_multiplier},
+                recommendation="Review invoice burst for signs of fraudulent billing.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+            )
+        return None
+
+    def check_amount_clustering(self, invoice: InvoiceEntities, history: list[InvoiceEntities], threshold_buffer: float = 0.05) -> PolicyViolation | None:
+        approval_threshold = float(self.policy.amount_thresholds.vendor_payment_approval_above)
+        current_vendor = (invoice.vendor_name or "").strip().lower()
+        current_amount = float(invoice.total_amount or invoice.subtotal or 0.0)
+        lower_bound = approval_threshold * (1.0 - threshold_buffer)
+        if not current_vendor or not (lower_bound <= current_amount < approval_threshold):
+            return None
+        clustered = [
+            old for old in history
+            if (old.vendor_name or "").strip().lower() == current_vendor
+            and lower_bound <= float(old.total_amount or old.subtotal or 0.0) < approval_threshold
+        ]
+        if len(clustered) >= 1:
+            count = len(clustered) + 1
+            return self._build_violation(
+                rule_name="amount_clustering",
+                severity="HIGH",
+                description=f"Vendor '{invoice.vendor_name}' has {count} invoices clustered just below approval threshold {approval_threshold:.2f}.",
+                evidence={"vendor": invoice.vendor_name, "invoice_count": count, "approval_threshold": approval_threshold, "current_amount": current_amount, "buffer_pct": threshold_buffer * 100},
+                recommendation="Aggregate invoices and enforce single approval — likely threshold avoidance.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=current_amount,
+            )
+        return None
+
+    def check_unusually_high_invoice(self, invoice: InvoiceEntities, history: list[InvoiceEntities], z_threshold: float = 2.5) -> PolicyViolation | None:
+        import statistics
+        current_amount = float(invoice.total_amount or invoice.subtotal or 0.0)
+        if current_amount <= 0:
+            return None
+        amounts = [
+            float(old.total_amount or old.subtotal or 0.0)
+            for old in history
+            if float(old.total_amount or old.subtotal or 0.0) > 0
+        ]
+        if len(amounts) < 3:
+            return None
+        mean = statistics.mean(amounts)
+        stdev = statistics.stdev(amounts)
+        if stdev == 0:
+            return None
+        z = (current_amount - mean) / stdev
+        if z >= z_threshold:
+            return self._build_violation(
+                rule_name="unusually_high_invoice",
+                severity="HIGH",
+                description=f"Invoice amount {current_amount:.2f} is {z:.1f} standard deviations above mean {mean:.2f} for vendor '{invoice.vendor_name}'.",
+                evidence={"vendor": invoice.vendor_name, "amount": current_amount, "mean": round(mean, 2), "stdev": round(stdev, 2), "z_score": round(z, 3), "threshold": z_threshold},
+                recommendation="Request additional approval and supporting documentation for outlier invoice.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=current_amount,
+            )
+        return None
+
+    def check_cgst_sgst_split(self, invoice: InvoiceEntities) -> PolicyViolation | None:
+        cgst = invoice.cgst_amount
+        sgst = invoice.sgst_amount
+        if cgst is None or sgst is None:
+            return None
+        if cgst <= 0 and sgst <= 0:
+            return None
+        tolerance = max(1.0, 0.01 * max(abs(cgst), abs(sgst)))
+        if abs(cgst - sgst) > tolerance:
+            return self._build_violation(
+                rule_name="cgst_sgst_split_mismatch",
+                severity="HIGH",
+                description=f"CGST {cgst:.2f} and SGST {sgst:.2f} are not equal — they must be equal for intra-state supply.",
+                evidence={"invoice_number": invoice.invoice_number, "vendor": invoice.vendor_name, "cgst": cgst, "sgst": sgst, "difference": round(abs(cgst - sgst), 2)},
+                recommendation="Correct tax split before filing — CGST must equal SGST for intra-state transactions.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+            )
+        return None
+
+    def check_interstate_tax_type(self, invoice: InvoiceEntities) -> PolicyViolation | None:
+        vendor_gstin = (invoice.vendor_gst or "").strip().upper()
+        place_of_supply = (invoice.place_of_supply or "").strip().upper()
+        if not vendor_gstin or not place_of_supply or len(vendor_gstin) < 2:
+            return None
+
+        vendor_state = vendor_gstin[:2]
+        pos_match = re.search(r"\b(\d{2})\b", place_of_supply)
+        if pos_match:
+            supply_state = pos_match.group(1)
+        else:
+            supply_state = place_of_supply[:2]
+
+        if not supply_state or len(supply_state) != 2 or not supply_state.isdigit():
+            return None
+
+        is_interstate = vendor_state != supply_state
+        has_igst = (invoice.igst_amount or 0.0) > 0
+        has_cgst_sgst = (invoice.cgst_amount or 0.0) > 0 or (invoice.sgst_amount or 0.0) > 0
+
+        if is_interstate and has_cgst_sgst and not has_igst:
+            return self._build_violation(
+                rule_name="interstate_tax_type_mismatch",
+                severity="HIGH",
+                description=(
+                    f"Invoice '{invoice.invoice_number or 'invoice'}' appears interstate based on GSTIN '{vendor_gstin}' and place of supply '{place_of_supply}', but CGST/SGST are used instead of IGST."
+                ),
+                evidence={
+                    "vendor_gstin": vendor_gstin,
+                    "place_of_supply": place_of_supply,
+                    "vendor_state": vendor_state,
+                    "supply_state": supply_state,
+                    "igst_amount": invoice.igst_amount,
+                    "cgst_amount": invoice.cgst_amount,
+                    "sgst_amount": invoice.sgst_amount,
+                },
+                recommendation="Use IGST for interstate supply and correct the GST breakdown.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+            )
+
+        if not is_interstate and has_igst and not has_cgst_sgst:
+            return self._build_violation(
+                rule_name="intrastate_tax_type_mismatch",
+                severity="HIGH",
+                description=(
+                    f"Invoice '{invoice.invoice_number or 'invoice'}' appears intra-state based on GSTIN '{vendor_gstin}' and place of supply '{place_of_supply}', but IGST is used instead of CGST/SGST."
+                ),
+                evidence={
+                    "vendor_gstin": vendor_gstin,
+                    "place_of_supply": place_of_supply,
+                    "vendor_state": vendor_state,
+                    "supply_state": supply_state,
+                    "igst_amount": invoice.igst_amount,
+                    "cgst_amount": invoice.cgst_amount,
+                    "sgst_amount": invoice.sgst_amount,
+                },
+                recommendation="Use CGST and SGST for intra-state supply and correct the GST breakdown.",
+                document_name=invoice.invoice_number or "invoice",
+                amount_involved=float(invoice.total_amount or invoice.subtotal or 0.0) or None,
+            )
+
+        return None
+
     def evaluate_invoice(self, invoice: InvoiceEntities, history: list[InvoiceEntities], approval_threshold: float | None = None) -> list[PolicyViolation]:
         """Evaluate invoice-level policy checks."""
         violations: list[PolicyViolation] = []
@@ -568,9 +876,49 @@ class RulesEngine:
         if duplicate:
             violations.append(duplicate)
 
+        near_dup = self.check_near_duplicate_invoice(invoice, history)
+        if near_dup:
+            violations.append(near_dup)
+
+        same_amount_dup = self.check_same_amount_vendor_duplicate(invoice, history)
+        if same_amount_dup:
+            violations.append(same_amount_dup)
+
+        gstin_mismatch = self.check_gstin_name_mismatch(invoice, history)
+        if gstin_mismatch:
+            violations.append(gstin_mismatch)
+
+        sudden_activity = self.check_vendor_sudden_activity(invoice, history)
+        if sudden_activity:
+            violations.append(sudden_activity)
+
+        one_time = self.check_one_time_vendor(invoice, history)
+        if one_time:
+            violations.append(one_time)
+
+        freq_anomaly = self.check_frequency_anomaly(invoice, history)
+        if freq_anomaly:
+            violations.append(freq_anomaly)
+
+        clustering = self.check_amount_clustering(invoice, history)
+        if clustering:
+            violations.append(clustering)
+
+        high_invoice = self.check_unusually_high_invoice(invoice, history)
+        if high_invoice:
+            violations.append(high_invoice)
+
         gst_violation = self.check_gst_consistency(invoice)
         if gst_violation:
             violations.append(gst_violation)
+
+        cgst_sgst = self.check_cgst_sgst_split(invoice)
+        if cgst_sgst:
+            violations.append(cgst_sgst)
+
+        interstate = self.check_interstate_tax_type(invoice)
+        if interstate:
+            violations.append(interstate)
 
         return violations
 
@@ -635,7 +983,7 @@ class RulesEngine:
 
         vendor_groups: dict[str, list[TransactionEntity]] = defaultdict(list)
         for txn in normalized_transactions:
-            vendor_key = (txn.party_name or "unknown").strip().lower() or "unknown"
+            vendor_key = self._extract_vendor_token(txn.party_name or txn.description or "")
             vendor_groups[vendor_key].append(txn)
 
         for vendor_txns in vendor_groups.values():
@@ -745,6 +1093,39 @@ class RulesEngine:
             value,
             settings={"DATE_ORDER": "DMY", "PREFER_LOCALE_DATE_ORDER": False, "STRICT_PARSING": False},
         )
+
+    def _extract_vendor_token(self, text: str) -> str:
+        value = str(text or "").strip().upper()
+        if not value:
+            return "unknown"
+
+        def _clean_token(token: str) -> str:
+            return re.sub(r"[^A-Z]", "", token.strip().upper())
+
+        if "UPI" in value:
+            for token in reversed([part.strip() for part in value.split("/") if part.strip()]):
+                cleaned = _clean_token(token)
+                if len(cleaned) >= 3:
+                    return cleaned
+
+        if "NEFT" in value or "IMPS" in value:
+            for token in reversed([part.strip() for part in value.split() if part.strip()]):
+                cleaned = _clean_token(token)
+                if len(cleaned) >= 3:
+                    return cleaned
+
+        if "ACH" in value:
+            return "ACH"
+
+        if "CHEQUE" in value:
+            return "CHEQUE"
+
+        first_token = value.split()[0].strip()
+        cleaned_first = _clean_token(first_token)
+        if len(cleaned_first) >= 3:
+            return cleaned_first
+
+        return "unknown"
 
     def _load_blacklisted_vendors(self) -> list[dict[str, Any]]:
         blacklist_path = Path(__file__).resolve().parent.parent / "config" / "blacklisted_vendors.yaml"

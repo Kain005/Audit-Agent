@@ -18,7 +18,7 @@ LAST_PARSE_DEBUG: dict[str, Any] = {
     "rows_skipped": 0,
 }
 
-DATE_RE = re.compile(r"\d{2}[-/]\d{2}[-/]\d{2,4}")
+DATE_RE = re.compile(r"\d{1,2}[-/]\d{2}[-/]\d{2,4}|\d{1,2}\s+[A-Za-z]{2,4}\s+\d{2,4}")
 BALANCE_END_RE = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}\s*(?:CR|DR)?\s*$", flags=re.IGNORECASE)
 AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}\s*(?:CR|DR)?", flags=re.IGNORECASE)
 
@@ -104,6 +104,23 @@ def _normalize_date(text: str) -> str:
             return datetime.strptime(value, fmt).strftime("%d-%m-%Y")
         except ValueError:
             continue
+
+    # Try textual month forms (e.g. "12 Oct 2020"), including common OCR-truncated
+    # month tokens produced by EasyOCR (e.g. "Oc", "Ja", "Fe", "Se").
+    try:
+        value_text = value
+        # Normalize common truncations to full 3-letter month abbreviations
+        value_text = re.sub(r"\bOc\b", "Oct", value_text)
+        value_text = re.sub(r"\bJa\b", "Jan", value_text)
+        value_text = re.sub(r"\bFe\b", "Feb", value_text)
+        value_text = re.sub(r"\bSe\b", "Sep", value_text)
+
+        return datetime.strptime(value_text, "%d %b %Y").strftime("%d-%m-%Y")
+    except ValueError:
+        try:
+            return datetime.strptime(value_text, "%d %b %y").strftime("%d-%m-%Y")
+        except Exception:
+            pass
 
     if len(value.split("-")[-1]) == 2 or len(value.split("/")[-1]) == 2:
         separator = "-" if "-" in value else "/"
@@ -236,6 +253,15 @@ def clean_amount(text: Any) -> tuple[float, str | None]:
     if not raw:
         return 0.0, None
 
+    prefix_suffix: str | None = None
+    stripped = raw.lstrip()
+    if stripped.upper().startswith("DR ") or stripped.upper().startswith("DR\t"):
+        prefix_suffix = "DR"
+        raw = stripped[2:]
+    elif stripped.upper().startswith("CR ") or stripped.upper().startswith("CR\t"):
+        prefix_suffix = "CR"
+        raw = stripped[2:]
+
     compact = raw.upper()
     compact = compact.replace("₹", "")
     compact = re.sub(r"\b(?:RS\.?|INR)\b", "", compact)
@@ -263,6 +289,8 @@ def clean_amount(text: Any) -> tuple[float, str | None]:
     except ValueError:
         return 0.0, None
 
+    if prefix_suffix:
+        suffix = prefix_suffix
     if negative and not suffix:
         suffix = "DR"
 

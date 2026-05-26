@@ -148,7 +148,7 @@ def _density_segment_core(bgr_array: np.ndarray) -> list[np.ndarray]:
         if average_nearest_maxima <= 0:
             continue
 
-        if float(smoothed[minimum_index]) < 0.65 * average_nearest_maxima:
+        if float(smoothed[minimum_index]) < 0.80 * average_nearest_maxima:
             surviving_minima.append(minimum_index)
 
     cut_points = sorted({cut for cut in surviving_minima if 0 < cut < bgr_array.shape[0]})
@@ -161,7 +161,7 @@ def _density_segment_core(bgr_array: np.ndarray) -> list[np.ndarray]:
         if bottom <= top:
             continue
         strip = bgr_array[top:bottom]
-        if strip.size and 30 <= strip.shape[0] <= 300:
+        if strip.size and strip.shape[0] >= 30:
             strips.append(strip.copy())
 
     return strips

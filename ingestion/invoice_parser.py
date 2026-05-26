@@ -12,6 +12,10 @@ import pdfplumber
 from .parsers.normalizers import clean_amount, clean_date
 
 
+INVOICE_PROMPT = """Extract invoice data from the text below. Return ONLY a JSON object with these keys: vendor_name, vendor_gst, vendor_address, invoice_number, invoice_date, due_date, subtotal, gst_amount, total_amount, payment_terms, currency, line_items (array of: description, quantity, unit_price, amount, gst_rate). No markdown, no explanation.
+
+{raw_text}"""
+
 class InvoiceParser:
     """Parse invoice files into a normalized dataframe."""
 
@@ -247,3 +251,45 @@ class InvoiceParser:
     def _parse_amount(self, value: Any) -> float | None:
         cleaned = clean_amount(value)
         return cleaned if cleaned != 0.0 else None
+    
+    def parse_pdf_with_llm(self, file_path: str) -> dict:
+        raw_text, _ = self._extract_pdf_content(Path(file_path))
+
+        if len(raw_text.strip()) < 50:
+            return {"error": "Image-based invoice — text extraction not supported yet"}
+
+        words = raw_text.split()
+        if len(words) > 1500:
+            raw_text = " ".join(words[:1500])
+
+        from extraction.models import InvoiceEntities, LineItem
+        import requests, json
+
+        prompt = INVOICE_PROMPT.format(raw_text=raw_text)
+
+        try:
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={"model": "llama3.1:8b", "prompt": prompt, "stream": False, "options": {"temperature": 0}},
+                timeout=400,
+            )
+            response.raise_for_status()
+            raw_response = response.json().get("response", "").strip()
+
+            cleaned = raw_response
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1]
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+
+            parsed = json.loads(cleaned)
+            parsed["line_items"] = [LineItem(**item) for item in parsed.get("line_items", [])]
+            parsed["raw_text"] = raw_text
+            invoice = InvoiceEntities(**parsed)
+            return {"invoice_data": invoice, "doc_type": "invoice"}
+
+        except json.JSONDecodeError as e:
+            return {"error": f"Ollama returned invalid JSON: {e}"}
+        except Exception as e:
+            return {"error": f"Invoice parsing failed: {e}"}

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 DATE_ONLY_RE = re.compile(r"^\s*\d{2}[-/]\d{2}[-/]\d{2,4}\s*$")
 _ocr_engine = None
 
+
 def get_ocr_engine():
     global _ocr_engine
     if _ocr_engine is None:
@@ -47,6 +48,130 @@ def detect_pdf_type_and_scale(file_path: str) -> tuple[str, int]:
     return "image_pdf", 4
 
 
+def extract_image_pdf_full(file_path: str) -> list[dict[str, Any]]:
+    """Single OCR pass per page — returns raw_text, confidence, AND dataframe."""
+    pages_output: list[dict[str, Any]] = []
+    _, render_scale = detect_pdf_type_and_scale(file_path)
+    render_scale = min(render_scale, 2)
+
+    with pdfplumber.open(str(Path(file_path))) as pdf:
+        pdfium_pdf = pdfium.PdfDocument(str(Path(file_path)))
+        try:
+            for index, _page in enumerate(pdf.pages):
+                page_number = index + 1
+                try:
+                    pdfium_page = pdfium_pdf[index]
+                    bgr_array = _render_page_bgr(pdfium_page, render_scale)
+                    page_width = int(bgr_array.shape[1])
+                    density_strips = segment_rows_by_density(bgr_array)
+
+                    if not density_strips:
+                        pages_output.append({
+                            "page_number": page_number,
+                            "raw_text": "",
+                            "confidence": 0.0,
+                            "low_confidence": True,
+                            "dataframe": None,
+                        })
+                        continue
+
+                    ocr = get_ocr_engine()
+
+                    strip_ocr: list[list] = []
+                    for strip in density_strips:
+                        if strip.shape[0] > 200 and len(strip_ocr) < 8:
+                            strip_ocr.append([])
+                        else:
+                            strip_ocr.append(ocr.readtext(strip))
+
+                    all_texts = []
+                    all_confidences = []
+                    for ocr_result in strip_ocr:
+                        for item in ocr_result:
+                            try:
+                                text = str(item[1] or "").strip()
+                                conf = float(item[2]) if len(item) > 2 else 0.8
+                                if text:
+                                    all_texts.append(text)
+                                    all_confidences.append(conf)
+                            except Exception:
+                                continue
+                    raw_text = " ".join(all_texts)
+                    mean_conf = round(sum(all_confidences) / len(all_confidences), 4) if all_confidences else 0.0
+
+                    header_index = None
+                    column_ranges = []
+                    for strip_index, ocr_result in enumerate(strip_ocr):
+                        if strip_index > 12:
+                            break
+                        candidate_ranges = build_column_ranges_from_ocr(ocr_result, page_width)
+                        if len(candidate_ranges) >= 3:
+                            header_index = strip_index
+                            column_ranges = candidate_ranges
+                            break
+
+                    dataframe = None
+                    if header_index is not None:
+                        row_dicts = []
+                        for ocr_result in strip_ocr[header_index + 1:]:
+                            date_matches = re.findall(
+                                r"\d{2}-\d{2}-\d{2,4}",
+                                " ".join(str(item[1] or "").strip() for item in ocr_result or []),
+                            )
+
+                            if len(date_matches) >= 4:
+                                grouped_items: list[list] = []
+                                sorted_items = []
+                                for item in ocr_result or []:
+                                    try:
+                                        box = item[0]
+                                        top_y = float(min(point[1] for point in box))
+                                    except Exception:
+                                        continue
+                                    sorted_items.append((top_y, item))
+
+                                sorted_items.sort(key=lambda item: item[0])
+
+                                current_group: list = []
+                                previous_y: float | None = None
+                                for top_y, item in sorted_items:
+                                    if previous_y is not None and top_y - previous_y > 15 and current_group:
+                                        grouped_items.append(current_group)
+                                        current_group = []
+                                    current_group.append(item)
+                                    previous_y = top_y
+
+                                if current_group:
+                                    grouped_items.append(current_group)
+
+                                for grouped_ocr_result in grouped_items:
+                                    row_dicts.append(_map_row_to_columns_from_ocr(grouped_ocr_result, column_ranges, page_width))
+                            else:
+                                row_dicts.append(_map_row_to_columns_from_ocr(ocr_result, column_ranges, page_width))
+                        dataframe = pd.DataFrame(row_dicts) if row_dicts else None
+
+                    pages_output.append({
+                        "page_number": page_number,
+                        "raw_text": raw_text,
+                        "confidence": mean_conf,
+                        "low_confidence": mean_conf < 0.7,
+                        "dataframe": dataframe,
+                    })
+                except Exception as exc:
+                    logger.warning("extract_image_pdf_full failed page %s: %s", page_number, exc)
+                    pages_output.append({
+                        "page_number": page_number,
+                        "raw_text": "",
+                        "confidence": 0.0,
+                        "low_confidence": True,
+                        "dataframe": None,
+                    })
+        finally:
+            pdfium_pdf.close()
+
+    return pages_output
+
+
 def build_column_ranges(header_strip: np.ndarray, page_width: int) -> list[dict[str, int | str]]:
     """Detect column ranges from a header strip using EasyOCR header keywords."""
     if header_strip is None or getattr(header_strip, "size", 0) == 0 or page_width <= 0:
@@ -54,22 +179,59 @@ def build_column_ranges(header_strip: np.ndarray, page_width: int) -> list[dict[
 
     keyword_map = {
         "date": "date",
+        "dale": "date",
+        "txn dale": "date",
+        "value dale": "date",
         "value date": "value date",
         "narration": "narration",
+        "narralion": "narration",
         "particulars": "particulars",
+        "parliculars": "particulars",
         "description": "description",
+        "descriplion": "description",
+        "descripton": "description",
         "withdrawal": "withdrawal",
         "withdrawl": "withdrawl",
         "debit": "debit",
+        "debil": "debit",
         "deposit": "deposit",
         "credit": "credit",
+        "credil": "credit",
         "balance": "balance",
+        "balonce": "balance",
+        "balancc": "balance",
         "dr": "dr",
         "cr": "cr",
         "ref": "ref",
+        "rel cheque": "ref",
+        "rel": "ref",
         "chq": "chq",
         "cheque": "cheque",
     }
+
+    def _char_distance(left: str, right: str) -> int:
+        if left == right:
+            return 0
+        left_length = len(left)
+        right_length = len(right)
+        if left_length != right_length:
+            return abs(left_length - right_length) + sum(
+                1 for index in range(min(left_length, right_length)) if left[index] != right[index]
+            )
+        return sum(1 for index in range(left_length) if left[index] != right[index])
+
+    def _resolve_keyword(text: str) -> str | None:
+        if text in keyword_map:
+            return keyword_map[text]
+
+        closest_name = None
+        closest_distance = 3
+        for keyword, canonical_name in keyword_map.items():
+            distance = _char_distance(keyword, text)
+            if distance <= 2 and distance < closest_distance:
+                closest_name = canonical_name
+                closest_distance = distance
+        return closest_name
 
     ocr = get_ocr_engine()
     result = ocr.readtext(header_strip)
@@ -88,8 +250,9 @@ def build_column_ranges(header_strip: np.ndarray, page_width: int) -> list[dict[
         except Exception:
             continue
         normalized_text = re.sub(r"\s+", " ", text.lower()).strip()
-        if normalized_text in keyword_map:
-            detected_words.append({"text": keyword_map[normalized_text], "x_start": left_x, "x_end": right_x})
+        matched_keyword = _resolve_keyword(normalized_text)
+        if matched_keyword:
+            detected_words.append({"text": matched_keyword, "x_start": left_x, "x_end": right_x})
 
     detected_words.sort(key=lambda item: int(item["x_start"]))
 
@@ -534,6 +697,367 @@ def extract_text_by_page(file_path: str) -> list[dict[str, Any]]:
                     })
         finally:
             pdfium_pdf.close()
+
+    return pages_output
+
+
+def _map_row_to_columns_from_ocr(
+    ocr_result: list,
+    column_ranges: list[dict[str, int | str]],
+    page_width: int,
+) -> dict[str, str]:
+    """Map pre-computed OCR result to column ranges without re-running OCR."""
+    if not ocr_result or not column_ranges or page_width <= 0:
+        return {str(col.get("name", "")): "" for col in column_ranges}
+
+    normalized_columns = []
+    for col in column_ranges:
+        name = str(col.get("name", ""))
+        x_start = int(col.get("x_start", 0) or 0)
+        x_end = int(col.get("x_end", page_width) or page_width)
+        midpoint = (x_start + x_end) / 2.0
+        normalized_columns.append({"name": name, "x_start": x_start, "x_end": x_end, "midpoint": midpoint})
+
+    assigned_words: dict[str, list[tuple[float, str]]] = {str(col["name"]): [] for col in normalized_columns}
+
+    detected_words = []
+    for item in ocr_result or []:
+        try:
+            box, text = item[0], str(item[1] or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            left_x = float(min(p[0] for p in box))
+            right_x = float(max(p[0] for p in box))
+            center_x = (left_x + right_x) / 2.0
+        except Exception:
+            continue
+        detected_words.append((left_x, center_x, text))
+
+    detected_words.sort(key=lambda item: item[0])
+
+    for _, center_x, text in detected_words:
+        matched_index = None
+        for idx, col in enumerate(normalized_columns):
+            if float(col["x_start"]) <= center_x < float(col["x_end"]):
+                matched_index = idx
+                break
+        if matched_index is None:
+            nearest_index = 0
+            nearest_dist = abs(center_x - float(normalized_columns[0]["midpoint"]))
+            for idx, col in enumerate(normalized_columns[1:], start=1):
+                d = abs(center_x - float(col["midpoint"]))
+                if d < nearest_dist:
+                    nearest_dist = d
+                    nearest_index = idx
+            matched_index = nearest_index
+        col_name = str(normalized_columns[matched_index]["name"])
+        assigned_words[col_name].append((center_x, text))
+
+    return {
+        str(col["name"]): " ".join(t for _, t in sorted(assigned_words[str(col["name"])], key=lambda x: x[0])).strip()
+        for col in normalized_columns
+    }
+
+def build_column_ranges_from_ocr(
+    ocr_result: list,
+    page_width: int,
+) -> list[dict[str, int | str]]:
+    """Build column ranges from pre-computed OCR result."""
+    if not ocr_result or page_width <= 0:
+        return []
+
+    keyword_map = {
+        "date": "date", "txn date": "date", "transaction date": "date",
+        "value date": "date", "posting date": "date",
+        "dale": "date", "txn dale": "date", "value dale": "date",
+        "narration": "description", "particulars": "description",
+        "description": "description", "details": "description",
+        "remarks": "description", "txn remarks": "description",
+        "descriplion": "description", "descripton": "description",
+        "narralion": "description", "parliculars": "description",
+        "withdrawal": "debit", "withdrawl": "debit",
+        "debit": "debit", "debit amount": "debit", "dr": "debit",
+        "debil": "debit",
+        "deposit": "credit", "credit": "credit",
+        "credit amount": "credit", "cr": "credit", "credil": "credit",
+        "balance": "balance", "closing": "balance", "running": "balance",
+        "balonce": "balance", "balancc": "balance",
+        "ref": "ref", "chq": "ref", "cheque": "ref",
+        "reference": "ref", "chq/ref": "ref", "ref no": "ref",
+        "cheque no": "ref", "rel cheque": "ref", "rel": "ref",
+        "amount": "amount", "txn amount": "amount",
+    }
+
+    def _edit_distance(a: str, b: str) -> int:
+        if len(a) != len(b):
+            return abs(len(a) - len(b)) + sum(c1 != c2 for c1, c2 in zip(a, b))
+        return sum(c1 != c2 for c1, c2 in zip(a, b))
+
+    detected_words = []
+    for item in ocr_result or []:
+        try:
+            box, text = item[0], str(item[1] or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            left_x = int(round(min(p[0] for p in box)))
+            right_x = int(round(max(p[0] for p in box)))
+        except Exception:
+            continue
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        matched = keyword_map.get(normalized)
+        if matched is None:
+            for key in keyword_map:
+                if _edit_distance(normalized, key) <= 2:
+                    matched = keyword_map[key]
+                    break
+        if matched:
+            detected_words.append({"text": matched, "x_start": left_x, "x_end": right_x})
+
+    detected_words.sort(key=lambda item: int(item["x_start"]))
+    if len(detected_words) < 3:
+        return []
+
+    column_ranges = []
+    for index, word in enumerate(detected_words):
+        next_x = int(detected_words[index + 1]["x_start"]) if index + 1 < len(detected_words) else page_width
+        column_ranges.append({"name": str(word["text"]), "x_start": int(word["x_start"]), "x_end": int(next_x)})
+
+    return column_ranges if len(column_ranges) >= 3 else []
+
+
+def _map_data_region_to_rows(
+    ocr_result: list,
+    column_ranges: list[dict[str, int | str]],
+    page_width: int,
+    data_strips: list,
+    y_offset: int,
+) -> list[dict[str, str]]:
+    """Map a single OCR pass over the full data region into per-row dicts."""
+    if not ocr_result or not column_ranges:
+        return []
+
+    # Build row boundaries from strip heights
+    row_boundaries: list[tuple[int, int]] = []
+    y = 0
+    for strip in data_strips:
+        h = strip.shape[0]
+        row_boundaries.append((y, y + h))
+        y += h
+
+    if not row_boundaries:
+        return []
+
+    # Assign each OCR word to a row and column
+    col_names = [str(c["name"]) for c in column_ranges]
+    rows: list[dict[str, list[tuple[float, str]]]] = [
+        {name: [] for name in col_names} for _ in row_boundaries
+    ]
+
+    normalized_columns = []
+    for col in column_ranges:
+        x_start = int(col.get("x_start", 0) or 0)
+        x_end = int(col.get("x_end", page_width) or page_width)
+        normalized_columns.append({
+            "name": str(col["name"]),
+            "x_start": x_start,
+            "x_end": x_end,
+            "midpoint": (x_start + x_end) / 2.0,
+        })
+
+    for item in ocr_result or []:
+        try:
+            box, text = item[0], str(item[1] or "").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        try:
+            left_x = float(min(p[0] for p in box))
+            right_x = float(max(p[0] for p in box))
+            top_y = float(min(p[1] for p in box))
+            center_x = (left_x + right_x) / 2.0
+            center_y = top_y
+        except Exception:
+            continue
+
+        # Find row
+        row_index = None
+        for ri, (ry_start, ry_end) in enumerate(row_boundaries):
+            if ry_start <= center_y < ry_end:
+                row_index = ri
+                break
+        if row_index is None:
+            # Assign to nearest row
+            row_index = min(
+                range(len(row_boundaries)),
+                key=lambda i: abs(center_y - (row_boundaries[i][0] + row_boundaries[i][1]) / 2)
+            )
+
+        # Find column
+        col_index = None
+        for ci, col in enumerate(normalized_columns):
+            if col["x_start"] <= center_x < col["x_end"]:
+                col_index = ci
+                break
+        if col_index is None:
+            col_index = min(
+                range(len(normalized_columns)),
+                key=lambda i: abs(center_x - normalized_columns[i]["midpoint"])
+            )
+
+        col_name = normalized_columns[col_index]["name"]
+        rows[row_index][col_name].append((center_x, text))
+
+    return [
+        {
+            name: " ".join(t for _, t in sorted(rows[ri][name], key=lambda x: x[0])).strip()
+            for name in col_names
+        }
+        for ri in range(len(row_boundaries))
+    ]
+
+
+
+def extract_image_pdf_as_dataframe(file_path: str) -> list[dict[str, Any] | None]:
+    """Extract image-PDF pages as column-mapped DataFrames using density strips."""
+    pages_output: list[dict[str, Any] | None] = []
+    _, render_scale = detect_pdf_type_and_scale(file_path)
+    render_scale = min(render_scale, 2)
+
+
+    with pdfplumber.open(str(Path(file_path))) as pdf:
+        pdfium_pdf = pdfium.PdfDocument(str(Path(file_path)))
+        try:
+            for index, _page in enumerate(pdf.pages):
+                page_number = index + 1
+                try:
+                    pdfium_page = pdfium_pdf[index]
+                    bgr_array = _render_page_bgr(pdfium_page, render_scale)
+                    density_strips = segment_rows_by_density(bgr_array)
+                    if not density_strips:
+                        pages_output.append(None)
+                        continue
+
+                    page_width = int(bgr_array.shape[1])
+                    ocr = get_ocr_engine()
+                    header_index = None
+                    column_ranges = []
+                    cached_ocr: list[list] = []
+
+                    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+                    def _ocr_strip(args):
+                        idx, strip, skip = args
+                        if skip:
+                            return idx, []
+                        return idx, ocr.readtext(strip)
+
+                    skip_flags = [
+                        (header_index is None and s.shape[0] > 200)
+                        for s in density_strips
+                    ]
+                    # We don't know header_index yet so conservatively skip strips >200px in first 12
+                    skip_flags = [
+                        (i <= 12 and density_strips[i].shape[0] > 200)
+                        for i in range(len(density_strips))
+                    ]
+
+                    with _TPE(max_workers=4) as pool:
+                        results = list(pool.map(
+                            _ocr_strip,
+                            [(i, density_strips[i], skip_flags[i]) for i in range(len(density_strips))]
+                        ))
+
+                    results.sort(key=lambda x: x[0])
+                    cached_ocr = [r[1] for r in results]
+
+                    for strip_index, ocr_result in enumerate(cached_ocr):
+                        if header_index is None and strip_index <= 12:
+                            candidate_ranges = build_column_ranges_from_ocr(ocr_result, page_width)
+                            if len(candidate_ranges) >= 3:
+                                header_index = strip_index
+                                column_ranges = candidate_ranges
+
+                    if header_index is None:
+                        pages_output.append(None)
+                        continue
+
+                    row_dicts: list[dict[str, str]] = []
+                    for strip_index, ocr_result in enumerate(cached_ocr[header_index + 1:]):
+                        row_dicts.append(_map_row_to_columns_from_ocr(ocr_result, column_ranges, page_width))
+
+                    dataframe = pd.DataFrame(row_dicts)
+                    pages_output.append({
+                        "page_number": page_number,
+                        "dataframe": dataframe,
+                        "column_ranges": column_ranges,
+                    })
+                except Exception:
+                    pages_output.append(None)
+        finally:
+            pdfium_pdf.close()
+
+    return pages_output
+
+
+def extract_native_pdf_as_dataframe(file_path: str) -> list[dict[str, Any]]:
+    """Extract native-text PDF pages as normalized table DataFrames."""
+    pages_output: list[dict[str, Any]] = []
+
+    def _normalize_header_cell(cell: Any) -> str:
+        normalized_cell = str(cell or "").strip().lower()
+        if not normalized_cell:
+            return ""
+        if "withdrawal" in normalized_cell or "withdrawl" in normalized_cell:
+            return "debit"
+        if "deposit" in normalized_cell:
+            return "credit"
+        if "narration" in normalized_cell or "particulars" in normalized_cell or "description" in normalized_cell:
+            return "description"
+        if "balance" in normalized_cell:
+            return "balance"
+        if "date" in normalized_cell:
+            return "date"
+        if "ref" in normalized_cell or "chq" in normalized_cell:
+            return "ref_no"
+        return normalized_cell
+
+    with pdfplumber.open(str(Path(file_path))) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            page_frames: list[pd.DataFrame] = []
+            raw_tables = page.extract_tables() or []
+
+            for table in raw_tables:
+                if not table or len(table) < 2:
+                    continue
+
+                header_row = table[0]
+                normalized_headers = [_normalize_header_cell(cell) for cell in header_row]
+                table_rows = table[1:]
+
+                if not any(normalized_headers):
+                    continue
+
+                df = pd.DataFrame(table_rows, columns=normalized_headers)
+                df = df.loc[:, [column for column in df.columns if str(column).strip()]]
+                if not df.empty:
+                    page_frames.append(df)
+
+            if page_frames:
+                page_dataframe = pd.concat(page_frames, ignore_index=True, sort=False)
+            else:
+                page_dataframe = pd.DataFrame()
+
+            pages_output.append({
+                "page_number": page_number,
+                "dataframe": page_dataframe,
+            })
 
     return pages_output
 

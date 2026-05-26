@@ -18,16 +18,22 @@ class LineItem(BaseModel):
 class InvoiceEntities(BaseModel):
     vendor_name: str | None
     vendor_gst: str | None
-    vendor_address: str | None
+    vendor_address: str | None = None
     invoice_number: str | None
     invoice_date: str | None
-    due_date: str | None
+    due_date: str | None = None
     line_items: list[LineItem]
     subtotal: float | None
     gst_amount: float | None
     total_amount: float | None
-    payment_terms: str | None
+    payment_terms: str | None = None
     currency: str = "INR"
+    buyer_name: str | None = None 
+    buyer_gst: str | None = None
+    place_of_supply: str | None = None
+    cgst_amount: float | None = None
+    sgst_amount: float | None = None
+    igst_amount: float | None = None
     raw_text: str | None
 
 
@@ -82,3 +88,5 @@ class AuditReport(BaseModel):
     summary: str | None
     document_breakdown: dict[str, int] | None = None
     top_3_concerns: list[dict[str, Any]] | None = None
+    gst_invoices: list[dict[str, Any]] | None = None
+

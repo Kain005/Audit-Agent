@@ -580,8 +580,8 @@ async def upload_files(files: list[UploadFile] = File(...), db: Session = Depend
 @app.post("/analyze/{job_id}")
 def analyze_job(
     job_id: str,
+    background_tasks: BackgroundTasks,
     request_body: AnalyzeRequest | None = None,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
     job = db.query(AuditJob).filter(AuditJob.id == job_id).first()

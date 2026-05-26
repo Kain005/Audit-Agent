@@ -5,6 +5,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 import re
 import uuid
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -1242,7 +1243,7 @@ class AnomalyDetector:
             gst_col = self._find_existing_column(data, ["vendor_gst", "gstin", "supplier_gstin", "buyer_gstin"])
             account_col = self._find_existing_column(data, ["beneficiary_account", "account_number", "account_no", "bank_account"])
 
-            data["vendor_key"] = data[vendor_col].fillna("unknown").astype(str).str.strip().replace("", "unknown")
+            data["vendor_key"] = data[vendor_col].fillna("unknown").astype(str).apply(self._extract_vendor_token)
             data["gst_key"] = data[gst_col].fillna("").astype(str).str.strip().str.upper() if gst_col else ""
 
             no_gst_high = data[(data["amount"] > 20000) & (data["gst_key"].astype(str).str.strip() == "")]
@@ -1469,7 +1470,7 @@ class AnomalyDetector:
             else:
                 data["date"] = pd.Timestamp.now().strftime("%Y-%m-%d")
 
-        data["parsed_date"] = pd.to_datetime(data["date"], dayfirst=True, errors="coerce")
+        data["parsed_date"] = self._parse_mixed_sbi_dates(data["date"])
         data = data.dropna(subset=["parsed_date", "amount"]).copy()
 
         if "description" not in data.columns:
@@ -1492,6 +1493,30 @@ class AnomalyDetector:
                 data["document_name"] = "unknown"
 
         return data
+
+    def _parse_mixed_sbi_dates(self, values: pd.Series) -> pd.Series:
+        """Parse SBI OCR date strings across the observed statement formats."""
+        raw_values = values.astype(str).str.strip()
+        raw_values = raw_values.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+
+        parsed = pd.Series(pd.NaT, index=raw_values.index, dtype="datetime64[ns]")
+
+        for date_format in ("%d-%m-%Y", "%d %b %Y", "%d-%m-%y"):
+            candidate = pd.to_datetime(raw_values, format=date_format, errors="coerce")
+            parsed = parsed.fillna(candidate)
+
+        remaining_mask = parsed.isna() & raw_values.notna()
+        if remaining_mask.any():
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*infer.*format.*",
+                    category=UserWarning,
+                )
+                inferred = pd.to_datetime(raw_values[remaining_mask], dayfirst=True, errors="coerce")
+            parsed.loc[remaining_mask] = inferred
+
+        return parsed
 
     def _get_invoice_amount_threshold(self, rules: Any) -> float:
         default_threshold = 100000.0
@@ -1532,6 +1557,39 @@ class AnomalyDetector:
                 return candidate
         data["party_name"] = "unknown"
         return "party_name"
+
+    def _extract_vendor_token(self, text: str) -> str:
+        value = str(text or "").strip().upper()
+        if not value:
+            return "unknown"
+
+        def _clean_token(token: str) -> str:
+            return re.sub(r"[^A-Z]", "", token.strip().upper())
+
+        if "UPI" in value:
+            for token in reversed([part.strip() for part in value.split("/") if part.strip()]):
+                cleaned = _clean_token(token)
+                if len(cleaned) >= 3:
+                    return cleaned
+
+        if "NEFT" in value or "IMPS" in value:
+            for token in reversed([part.strip() for part in value.split() if part.strip()]):
+                cleaned = _clean_token(token)
+                if len(cleaned) >= 3:
+                    return cleaned
+
+        if "ACH" in value:
+            return "ACH"
+
+        if "CHEQUE" in value:
+            return "CHEQUE"
+
+        first_token = value.split()[0].strip()
+        cleaned_first = _clean_token(first_token)
+        if len(cleaned_first) >= 3:
+            return cleaned_first
+
+        return "unknown"
 
     def _parse_split_rules(self, rules: Any) -> _SplitBillingRules:
         # Supports dict-based config and dataclass/object-based config.

@@ -137,33 +137,39 @@ class SBILayoutParser:
                     suffix_pattern = re.compile(r"([0-9OBo,]+(?:\.\d+)?)\s*(DR|CR)\b", re.IGNORECASE)
                     standalone_pattern = re.compile(r"[0-9OBo,]+(?:\.\d+)?")
 
-                    standalone_amounts: List[float] = []
-                    for match in standalone_pattern.finditer(ln_clean):
-                        token = match.group(0)
-                        remainder = ln_clean[match.end():]
-                        if re.match(r"^\s*(?:DR|CR)\b", remainder, re.IGNORECASE):
-                            continue
-                        parsed_amount = cls._parse_amount(token)
-                        if parsed_amount is not None:
-                            standalone_amounts.append(parsed_amount)
-
                     suffix_debit = None
                     suffix_credit = None
+                    suffix_matches = []
                     for match in suffix_pattern.finditer(ln_clean):
                         parsed_amount = cls._parse_amount(match.group(1))
                         if parsed_amount is None:
                             continue
                         suffix = match.group(2).upper()
+                        suffix_matches.append((match.span(), parsed_amount, suffix))
                         if suffix == "DR":
                             suffix_debit = parsed_amount
                         elif suffix == "CR":
                             suffix_credit = parsed_amount
 
+                    standalone_amounts: List[float] = []
+                    for match in standalone_pattern.finditer(ln_clean):
+                        token_span = match.span()
+                        if any(
+                            token_span[0] < suffix_span[1] and token_span[1] > suffix_span[0]
+                            for suffix_span, _, _ in suffix_matches
+                        ):
+                            continue
+                        parsed_amount = cls._parse_amount(match.group(0))
+                        if parsed_amount is not None:
+                            standalone_amounts.append(parsed_amount)
+
                     if suffix_debit is not None:
                         debit = suffix_debit
                     if suffix_credit is not None:
                         credit = suffix_credit
-                    if standalone_amounts:
+                    if suffix_matches and suffix_matches[-1][2] == "CR":
+                        balance = suffix_matches[-1][1]
+                    elif standalone_amounts:
                         balance = standalone_amounts[-1]
 
                     if amt_tokens:

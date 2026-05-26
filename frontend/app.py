@@ -1164,6 +1164,41 @@ def page_documents():
                     doc_anomalies = []
             
             st.subheader(f"Findings in {selected}")
+            # GST invoice structured fields
+            report_data = st.session_state.get("report_data", {})
+            for gst_doc in (report_data.get("gst_invoices") or []):
+                gst_normalized = normalize_document_name(gst_doc.get("file_name", ""))
+                st.caption(f"debug: gst={gst_normalized} selected={normalized_selected}")
+                if gst_normalized == normalized_selected:
+                    inv = gst_doc.get("invoice_data") or {}
+                    st.markdown("**GST Invoice Details**")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        for label, key in [
+                            ("Invoice No", "invoice_number"),
+                            ("Invoice Date", "invoice_date"),
+                            ("Vendor", "vendor_name"),
+                            ("Vendor GSTIN", "vendor_gst"),
+                            ("Place of Supply", "place_of_supply"),
+                        ]:
+                            val = inv.get(key)
+                            if val not in (None, "", 0):
+                                st.markdown(f"**{label}:** {val}")
+                    with c2:
+                        for label, key in [
+                            ("Buyer", "buyer_name"),
+                            ("Buyer GSTIN", "buyer_gst"),
+                            ("Total (₹)", "total_amount"),
+                            ("CGST (₹)", "cgst_amount"),
+                            ("SGST (₹)", "sgst_amount"),
+                            ("IGST (₹)", "igst_amount"),
+                        ]:
+                            val = inv.get(key)
+                            if val not in (None, "", 0):
+                                st.markdown(f"**{label}:** {val}")
+                    st.divider()
+                    break
+
             if doc_anomalies:
                 for a in doc_anomalies:
                     severity_color = {

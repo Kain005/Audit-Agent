@@ -5,15 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .llm_bank_parser import parse_image_pdf_with_llm
 import pandas as pd
 
 from .bank_statement_parser import BankStatementParser
 from .expense_parser import ExpenseParser
 from .invoice_parser import InvoiceParser
 from .gst_parser import GSTParser
+from . import gst_invoice_parser
 from .ledger_parser import LedgerParser
 from .pdf_parser import PDFParser
 from .bank_pdf_parser import parse_bank_pdf, to_standard_transactions
+from ingestion.pdf_parser import extract_image_pdf_full, detect_pdf_type_and_scale
+from ingestion.bank_pdf_parser import parse_dataframe_transactions
 
 
 class DocumentRouter:
@@ -58,48 +62,108 @@ class DocumentRouter:
             suffix = path.suffix.lower()
 
             if suffix == ".pdf":
-                pdf_result = self.pdf_parser.parse(str(path))
-                raw_text = str(pdf_result.get("raw_text") or "")
-                data = pdf_result.get("data", pd.DataFrame())
+                pdf_type, render_scale = detect_pdf_type_and_scale(str(path))
+
+                if pdf_type == "image_pdf":
+                    pages = extract_image_pdf_full(str(path))
+                    raw_text = " ".join(
+                        p.get("raw_text", "") for p in pages if p.get("raw_text")
+                    )
+                    all_rows: list[dict] = []
+                    for page in pages:
+                        df = page.get("dataframe")
+                        if df is not None and not df.empty:
+                            transactions = parse_dataframe_transactions(df)
+                            all_rows.extend(transactions)
+                    if all_rows:
+                        data = pd.DataFrame(all_rows)
+                    else:
+                        data = pd.DataFrame()
+                else:
+                    pdf_result = self.pdf_parser.parse(str(path))
+                    raw_text = str(pdf_result.get("raw_text") or "")
+                    data = pdf_result.get("data", pd.DataFrame())
 
                 result["raw_text"] = raw_text
                 result["data"] = data
-                result["parser_used"] = "PDFParser"
+                result["parser_used"] = "ImagePDFParser" if pdf_type == "image_pdf" else "PDFParser"
+
+                if gst_invoice_parser.looks_like_gst_invoice_pdf(str(path)):
+                    try:
+                        invoice_entities = gst_invoice_parser.parse_pdf(str(path))
+                        result["document_type"] = "gst_invoice"
+                        result["invoice_data"] = invoice_entities.model_dump()
+                        result["data"] = pd.DataFrame()
+                        result["parser_used"] = "GSTInvoiceParser"
+                        return result
+                    except Exception as exc:
+                        result["parse_errors"].append(f"GSTInvoiceParser failed: {exc}")
 
                 if self._looks_like_invoice(path.name, raw_text):
-                    invoice_result = self.invoice_parser.parse(str(path))
-                    result["document_type"] = "invoice"
-                    result["data"] = invoice_result["data"]
-                    result["invoice_data"] = invoice_result["data"].to_dict(orient="records")
-                    result["parser_used"] = "InvoiceParser"
+                    llm_result = self.invoice_parser.parse_pdf_with_llm(str(path))
+                    if "error" in llm_result:
+                        result["document_type"] = "invoice_error"
+                        result["parse_errors"].append(llm_result["error"])
+                        result["parser_used"] = "InvoiceParser"
+                    else:
+                        result["document_type"] = "invoice"
+                        result["invoice_data"] = llm_result["invoice_data"]
+                        result["data"] = pd.DataFrame()
+                        result["parser_used"] = "InvoiceParserLLM"
                     return result
 
                 if self._looks_like_bank_statement(raw_text=raw_text, df=data):
-                    # attempt to parse bank statement PDF using bank-specific PDF parser
+                    result["document_type"] = "bank_statement"
+
+                    if pdf_type == "image_pdf":
+                        try:
+                            bank_name_hint = "generic"
+                            llm_df = parse_image_pdf_with_llm(str(path), bank_name=bank_name_hint)
+                            if not llm_df.empty:
+                                result["transactions"] = llm_df.to_dict(orient="records")
+                                result["bank_name"] = bank_name_hint
+                                result["parser_used"] = "LLMBankParser"
+                                return result
+                        except Exception as exc:
+                            result["parse_errors"].append(f"LLMBankParser failed: {exc}")
+                    
+                        # fallback: regex OCR text parser
+                        ocr_text = raw_text
+                        if not ocr_text:
+                            try:
+                                pages = extract_image_pdf_full(str(path))
+                                ocr_text = " ".join(p.get("raw_text", "") for p in pages if p.get("raw_text"))
+                            except Exception:
+                                ocr_text = ""
+                        ocr_df = self._parse_ocr_text_to_transactions(ocr_text)
+                        if not ocr_df.empty:
+                            result["data"] = ocr_df
+                            result["parser_used"] = "OCRTextParser"
+                        return result
+
+                    # native text PDF — use existing parse_bank_pdf path
                     try:
                         parsed = parse_bank_pdf(str(path))
                         bank_name = str(parsed.get("bank", "generic") or "generic")
                         used_ocr_fallback = False
 
-                        # If transactions are empty, trigger regex fallback.
                         if not parsed.get("transactions") and parsed.get("raw_text"):
-                            df = self._parse_ocr_text_to_transactions(str(parsed.get("raw_text") or ""), bank_name)
+                            df = self._parse_ocr_text_to_transactions(
+                                str(parsed.get("raw_text") or ""), bank_name
+                            )
                             used_ocr_fallback = True
                         else:
                             df = pd.DataFrame(to_standard_transactions(parsed))
 
                         result["bank_name"] = bank_name
                         result["data"] = df
-                        result["document_type"] = "bank_statement"
                         result["parser_used"] = "OCRTextParser" if used_ocr_fallback else "BankStatementParser"
 
-                        # surface parse warnings in UI metadata if parsing was partial
                         if parsed.get("partial"):
                             result["parse_warnings"] = parsed.get("parse_warnings", [])
 
                         return result
                     except Exception:
-                        # fallback to raw tables if parsing fails; try OCR-text parsing
                         result["document_type"] = "bank_statement"
                         if result["data"].empty and raw_text:
                             ocr_df = self._parse_ocr_text_to_transactions(raw_text)
@@ -113,7 +177,7 @@ class DocumentRouter:
                         return result
 
                 if self.expense_parser.looks_like_expense_sheet(data):
-                    result["data"] = self._normalize_expense_transaction_frame(self.expense_parser.parse(str(path)))
+                    result["data"] = self.expense_parser.parse(str(path))
                     result["document_type"] = "expense_sheet"
                     result["parser_used"] = "ExpenseParser"
                     return result
@@ -126,7 +190,7 @@ class DocumentRouter:
                     preview_df = pd.read_csv(path)
 
                     if self.expense_parser.looks_like_expense_sheet(preview_df):
-                        data = self._normalize_expense_transaction_frame(self.expense_parser.parse(str(path)))
+                        data = self.expense_parser.parse(str(path))
                         result["data"] = data
                         result["document_type"] = "expense_sheet"
                         result["parser_used"] = "ExpenseParser"
@@ -179,7 +243,7 @@ class DocumentRouter:
                         break
 
                 if expense_detected:
-                    data = self._normalize_expense_transaction_frame(self.expense_parser.parse(str(path)))
+                    data = self.expense_parser.parse(str(path))
                     result["data"] = data
                     result["document_type"] = "expense_sheet"
                     result["parser_used"] = "ExpenseParser"
@@ -226,7 +290,11 @@ class DocumentRouter:
         import re
         from ingestion.parsers.normalizers import clean_amount, clean_date
 
-        DATE_RE = re.compile(r"\b(\d{2}[\-]\d{2}[\-]\d{2,4})\b")
+        DATE_RE = re.compile(
+            r"\b(\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4})"
+            r"|\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})\b",
+            re.IGNORECASE,
+        )
         AMOUNT_RE = re.compile(r"[\d,]+\.?\d*")
 
         rows: list[dict[str, Any]] = []
@@ -244,7 +312,8 @@ class DocumentRouter:
             for index, part in enumerate(parts):
                 date_match = DATE_RE.search(part)
                 if date_match:
-                    date_value = clean_date(date_match.group(1))
+                    matched_str = date_match.group(1) or date_match.group(2) or ""
+                    date_value = clean_date(matched_str.strip())
                     date_index = index
                     break
 

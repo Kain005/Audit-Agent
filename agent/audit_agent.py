@@ -65,6 +65,9 @@ class AgentState(TypedDict):
     expense_violations: list[PolicyViolation]
     document_summary: dict[str, int]
     reconciliation: dict[str, Any]
+    combined_df: pd.DataFrame | None
+    combined_transaction_count: int
+    gst_transaction_count: int
     explained_findings: list[Any]
     report: AuditReport | None
     errors: list[str]
@@ -111,7 +114,8 @@ def _fallback_report_from_state(state: AgentState, error_message: str | None = N
         1 for item in violations if str(item.severity).upper() == "LOW"
     )
 
-    risk_score = min(100.0, float((high_count * 15) + (medium_count * 7) + (low_count * 2)))
+    base = (high_count * 25) + (medium_count * 10) + (low_count * 3)
+    risk_score = min(100.0, round((base / 300) * 100, 1))
 
     summary = _extract_summary(state.get("explained_findings", []))
     if error_message:
@@ -146,9 +150,20 @@ def safe_node(func):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            errors = state.get("errors", [])
+            errors = list(state.get("errors", []))
             errors.append(f"{func.__name__}: {str(e)}")
-            return {"errors": errors}
+            # Return full state fields to prevent LangGraph from losing upstream data
+            return {
+                "errors": errors,
+                "invoices": state.get("invoices", []),
+                "transactions": state.get("transactions", []),
+                "parsed_documents": state.get("parsed_documents", []),
+                "expense_sheets": state.get("expense_sheets", []),
+                "gst_documents": state.get("gst_documents", []),
+                "known_vendors": state.get("known_vendors", []),
+                "document_summary": state.get("document_summary", {}),
+                "reconciliation": state.get("reconciliation", {}),
+            }
     return wrapper
 
 
@@ -184,11 +199,15 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
     router = DocumentRouter()
     files = state.get("files", [])
     raw_documents = router.process_batch(files)
+    with open("C:\\Financial Audit\\ingest_debug.txt", "w") as _f:
+        for d in raw_documents:
+            _f.write(f"type={d.get('document_type')} parser={d.get('parser_used')} invoice_data_keys={list((d.get('invoice_data') or {}).keys()) if d.get('invoice_data') else 'None'} errors={d.get('parse_errors')}\n")
     parsed_documents: list[dict[str, Any]] = []
     errors = list(state.get("errors", []))
 
     document_summary: dict[str, int] = {
         "invoice": 0,
+        "gst_invoice": 0,
         "bank_statement": 0,
         "ledger": 0,
         "expense_sheet": 0,
@@ -208,11 +227,28 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
         parsed_documents.append(normalized_doc)
 
     invoices_docs = [doc for doc in parsed_documents if doc.get("document_type") == "invoice"]
+    gst_invoice_docs = [doc for doc in parsed_documents if doc.get("document_type") == "gst_invoice"]
+    invoices: list[Any] = []
+    for doc in invoices_docs:
+        invoice_data = doc.get("invoice_data")
+        if invoice_data is not None:
+            invoices.append(invoice_data)
+    for doc in gst_invoice_docs:
+        invoice_data = doc.get("invoice_data")
+        if invoice_data is None:
+            continue
+        if isinstance(invoice_data, InvoiceEntities):
+            invoices.append(invoice_data)
+        elif isinstance(invoice_data, dict):
+            try:
+                invoices.append(InvoiceEntities(**invoice_data))
+            except Exception as exc:
+                errors.append(f"GSTInvoice deserialization failed: {exc}")
     bank_docs = [doc for doc in parsed_documents if doc.get("document_type") == "bank_statement"]
     ledger_docs = [doc for doc in parsed_documents if doc.get("document_type") == "ledger"]
     expense_docs = [doc for doc in parsed_documents if doc.get("document_type") == "expense_sheet"]
     gst_docs = [doc for doc in parsed_documents if doc.get("document_type") == "gst_document"]
-
+    
     for doc in parsed_documents:
         parse_errors = doc.get("parse_errors", [])
         if isinstance(parse_errors, list):
@@ -221,9 +257,10 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
                     errors.append(str(err))
 
     LOGGER.info(
-        "Step ingest: processed=%s invoices=%s bank_statements=%s ledgers=%s expense_sheets=%s gst_documents=%s",
+        "Step ingest: processed=%s invoices=%s gst_invoices=%s bank_statements=%s ledgers=%s expense_sheets=%s gst_documents=%s",
         len(files),
         len(invoices_docs),
+        len(gst_invoice_docs),
         len(bank_docs),
         len(ledger_docs),
         len(expense_docs),
@@ -233,6 +270,8 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
     return {
         "parsed_documents": parsed_documents,
         "document_summary": document_summary,
+        "invoices": invoices,
+        "expense_sheets": expense_docs,
         "errors": errors,
         "current_step": "ingest",
     }
@@ -245,7 +284,8 @@ def extract_node(state: AgentState) -> dict[str, Any]:
     expense_parser = ExpenseParser()
     gst_parser = GSTParser()
 
-    invoices: list[InvoiceEntities] = []
+    invoices: list[InvoiceEntities] = list(state.get("invoices", []))
+    
     transactions: list[TransactionEntity] = []
     expense_sheets: list[pd.DataFrame] = []
     gst_documents: list[dict[str, Any]] = []
@@ -332,6 +372,7 @@ def extract_node(state: AgentState) -> dict[str, Any]:
         len(known_vendors),
     )
 
+    
     return {
         "invoices": invoices,
         "transactions": transactions,
@@ -355,18 +396,22 @@ def cross_reference_node(state: AgentState) -> dict[str, Any]:
             state.get("transactions", []),
         )
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         errors.append(f"Cross-reference failed: {exc}")
         reconciliation = {
             "matched_pairs": [],
             "unmatched_invoices": state.get("invoices", []),
             "unmatched_payments": state.get("transactions", []),
         }
+    
 
     LOGGER.info(
         "Step cross_reference: matched_pairs=%s",
         len(reconciliation.get("matched_pairs", [])),
     )
 
+    
     return {
         "reconciliation": reconciliation,
         "errors": errors,
@@ -387,6 +432,16 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
         if doc.get("document_type") == "bank_statement":
             df = doc.get("data")
             if df is not None and not df.empty:
+                df = df.copy()
+                file_name = doc.get("file_name")
+                bank_name = doc.get("bank_name")
+                if isinstance(file_name, str) and file_name.strip() and file_name.strip().lower() != "unknown":
+                    document_name = file_name.strip()
+                elif isinstance(bank_name, str) and bank_name.strip():
+                    document_name = bank_name.strip()
+                else:
+                    document_name = "unknown"
+                df["document_name"] = document_name
                 all_transactions.append(df)
 
     tx_df = pd.concat(all_transactions, ignore_index=True) if all_transactions else pd.DataFrame()
@@ -403,6 +458,22 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
         data = doc.get("data")
         if data is not None and hasattr(data, "shape") and not data.empty:
             dfs_to_combine.append(data)
+        elif doc.get("document_type") == "invoice":
+            invoice = doc.get("invoice_data")
+            if invoice is not None:
+                rows = [
+                    {
+                        "description": item.description,
+                        "amount": item.amount,
+                        "quantity": item.quantity,
+                        "unit_price": item.unit_price,
+                        "gst_rate": item.gst_rate,
+                        "document_name": doc.get("file_name", "unknown"),
+                    }
+                    for item in invoice.line_items
+                ]
+                if rows:
+                    dfs_to_combine.append(pd.DataFrame(rows))
 
     if dfs_to_combine:
         combined_df = pd.concat(dfs_to_combine, ignore_index=True)
@@ -430,7 +501,7 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
     try:
         # Run detection when either bank transactions or GST data are present.
         # Prefer bank transactions as primary input, but allow GST-only audits.
-        primary_df = tx_df if not tx_df.empty else gst_df
+        primary_df = tx_df if not tx_df.empty else (expense_df if not expense_df.empty else gst_df)
         if not primary_df.empty:
             all_findings = detector.detect_all(
                 primary_df,
@@ -620,8 +691,8 @@ def compile_report_node(state: AgentState) -> dict[str, Any]:
     medium_count = sum(1 for finding in all_findings if finding.severity == "MEDIUM")
     low_count = sum(1 for finding in all_findings if finding.severity == "LOW")
 
-    raw_score = (high_count * 15) + (medium_count * 7) + (low_count * 2)
-    risk_score = min(raw_score, 100)
+    base = (high_count * 25) + (medium_count * 10) + (low_count * 3)
+    risk_score = min(100.0, round((base / 300) * 100, 1))
 
     reconciliation = state.get("reconciliation", {})
     unmatched_invoices_raw = reconciliation.get("unmatched_invoices", [])
@@ -640,6 +711,15 @@ def compile_report_node(state: AgentState) -> dict[str, Any]:
         if isinstance(doc.get("data"), pd.DataFrame)
     )
 
+    gst_invoice_payloads = [
+        {
+            "file_name": doc.get("file_name", ""),
+            "invoice_data": doc.get("invoice_data") or {},
+        }
+        for doc in state.get("parsed_documents", [])
+        if doc.get("document_type") == "gst_invoice"
+    ]
+
     report = AuditReport(
         report_id=str(uuid.uuid4()),
         generated_at=datetime.now().isoformat(),
@@ -656,6 +736,7 @@ def compile_report_node(state: AgentState) -> dict[str, Any]:
         summary=summary,
         document_breakdown=document_breakdown,
         top_3_concerns=top_3_concerns,
+        gst_invoices=gst_invoice_payloads if gst_invoice_payloads else None,
     )
 
     report_payload = sanitize_for_json(report.model_dump())
