@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import wraps
 import logging
+from pydoc import doc
 import uuid
 from datetime import datetime
 from typing import Any, Callable, TypedDict
@@ -114,7 +115,7 @@ def _fallback_report_from_state(state: AgentState, error_message: str | None = N
         1 for item in violations if str(item.severity).upper() == "LOW"
     )
 
-    base = (high_count * 25) + (medium_count * 10) + (low_count * 3)
+    base = (high_count * 18) + (medium_count * 6) + (low_count * 2)
     risk_score = min(100.0, round((base / 300) * 100, 1))
 
     summary = _extract_summary(state.get("explained_findings", []))
@@ -129,7 +130,14 @@ def _fallback_report_from_state(state: AgentState, error_message: str | None = N
         report_id=str(pd.Timestamp.utcnow().value),
         generated_at=pd.Timestamp.utcnow().isoformat(),
         documents_processed=len(state.get("files", [])),
-        total_transactions=len(state.get("combined_df", state.get("transactions", []))),
+        total_transactions=(
+    sum(
+        len(doc.get("data")) if isinstance(doc.get("data"), pd.DataFrame) else 0
+        for doc in state.get("parsed_documents", [])
+        if doc.get("document_type") in ("bank_statement", "expense_sheet")
+    )
+    or len(state.get("transactions", []))
+),
         total_invoices=len(state.get("invoices", [])),
         risk_score=risk_score,
         anomalies=anomalies,
@@ -201,7 +209,7 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
     raw_documents = router.process_batch(files)
     with open("C:\\Financial Audit\\ingest_debug.txt", "w") as _f:
         for d in raw_documents:
-            _f.write(f"type={d.get('document_type')} parser={d.get('parser_used')} invoice_data_keys={list((d.get('invoice_data') or {}).keys()) if d.get('invoice_data') else 'None'} errors={d.get('parse_errors')}\n")
+            _f.write(f"type={d.get('document_type')} parser={d.get('parser_used')} invoice_data_keys={list((d.get('invoice_data') if isinstance(d.get('invoice_data'), dict) else (d.get('invoice_data').model_dump() if d.get('invoice_data') else {})).keys())}\n")
     parsed_documents: list[dict[str, Any]] = []
     errors = list(state.get("errors", []))
 
@@ -231,8 +239,15 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
     invoices: list[Any] = []
     for doc in invoices_docs:
         invoice_data = doc.get("invoice_data")
-        if invoice_data is not None:
+        if invoice_data is None:
+            continue
+        if isinstance(invoice_data, InvoiceEntities):
             invoices.append(invoice_data)
+        elif isinstance(invoice_data, dict):
+            try:
+                invoices.append(InvoiceEntities(**invoice_data))
+            except Exception as exc:
+                errors.append(f"Invoice deserialization failed: {exc}")
     for doc in gst_invoice_docs:
         invoice_data = doc.get("invoice_data")
         if invoice_data is None:
@@ -281,6 +296,8 @@ def ingest_node(state: AgentState) -> dict[str, Any]:
 def extract_node(state: AgentState) -> dict[str, Any]:
     """Extract invoice entities, transactions, and known vendors from parsed documents."""
     extractor = EntityExtractor()
+    print(f"DEBUG parsed_documents count: {len(state.get('parsed_documents', []))}", flush=True)
+
     expense_parser = ExpenseParser()
     gst_parser = GSTParser()
 
@@ -294,6 +311,7 @@ def extract_node(state: AgentState) -> dict[str, Any]:
 
     for parsed in state.get("parsed_documents", []):
         doc_type = str(parsed.get("document_type", "unknown"))
+        print(f"DEBUG doc_type={doc_type} parser_used={parsed.get('parser_used')}", flush=True)
         parser_used = str(parsed.get("parser_used", ""))
         raw_text = parsed.get("raw_text")
         data = parsed.get("data")
@@ -301,10 +319,14 @@ def extract_node(state: AgentState) -> dict[str, Any]:
         try:
             if doc_type == "invoice":
                 invoice_text = str(raw_text or "")
+                print(f"DEBUG invoice doc: raw_text_len={len(invoice_text)} data_type={type(data).__name__}", flush=True)
+
+
                 if not invoice_text and isinstance(data, pd.DataFrame) and not data.empty:
                     invoice_text = data.to_string(index=False)
 
                 if invoice_text.strip():
+                    print(f"DEBUG invoice_text length: {len(invoice_text or '')}", flush=True)
                     invoices.append(extractor.extract_invoice_entities(invoice_text))
                 else:
                     errors.append(f"No extractable invoice text found for parser={parser_used}")
@@ -445,7 +467,42 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
                 all_transactions.append(df)
 
     tx_df = pd.concat(all_transactions, ignore_index=True) if all_transactions else pd.DataFrame()
+
+# ── TEMPORARY DEBUG ──────────────────────────────────────────────────────────
+    if not tx_df.empty:
+        from analysis.anomaly_detector import AnomalyDetector as _AD
+        _d = _AD()
+        _prepared = _d._prepare_dataframe(tx_df)
+        _tagged = _d.tag_transaction_categories(_prepared)
+
+        print(f"DEBUG category counts:\n{_tagged['transaction_category'].value_counts().to_dict()}", flush=True)
+
+        f1 = _d.detect_amount_outliers(_tagged)
+        print(f"DEBUG amount_outliers={len(f1)}", flush=True)
+
+        f2 = _d.detect_timing_anomalies(_tagged)
+        print(f"DEBUG timing_anomalies={len(f2)}", flush=True)
+
+        f3 = _d.detect_frequency_anomalies(_tagged)
+        print(f"DEBUG frequency_anomalies={len(f3)}", flush=True)
+
+        f4 = _d.detect_split_billing(_tagged, {})
+        print(f"DEBUG split_billing={len(f4)}", flush=True)
+
+        f5 = _d.detect_multivariate_anomalies(_tagged)
+        print(f"DEBUG multivariate={len(f5)}", flush=True)
+
+        f6 = _d.detect_suspicious_payment_patterns(_tagged)
+        print(f"DEBUG suspicious_patterns={len(f6)}", flush=True)
+
+        print(f"DEBUG debit nonzero={(_tagged['debit']>0).sum()}, credit nonzero={(_tagged['credit']>0).sum()}", flush=True)
+        print(f"DEBUG amount stats: mean={_tagged['amount'].mean():.0f} std={_tagged['amount'].std():.0f}", flush=True)
+        print(f"DEBUG weekend rows: {(_tagged['parsed_date'].dt.weekday >= 5).sum()}", flush=True)
+# ── END TEMPORARY DEBUG ──────────────────────────────────────────────────────
     expense_df = _concat_dataframes(state.get("expense_sheets", []))
+
+
+
     gst_df = _concat_dataframes([
         doc.get("data") for doc in state.get("gst_documents", []) if isinstance(doc.get("data"), pd.DataFrame)
     ])
@@ -458,20 +515,39 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
         data = doc.get("data")
         if data is not None and hasattr(data, "shape") and not data.empty:
             dfs_to_combine.append(data)
-        elif doc.get("document_type") == "invoice":
+        
+        # TO:
+        elif doc.get("document_type") == "invoice": 
+
             invoice = doc.get("invoice_data")
             if invoice is not None:
-                rows = [
-                    {
-                        "description": item.description,
-                        "amount": item.amount,
-                        "quantity": item.quantity,
-                        "unit_price": item.unit_price,
-                        "gst_rate": item.gst_rate,
-                        "document_name": doc.get("file_name", "unknown"),
-                    }
-                    for item in invoice.line_items
-                ]
+                # invoice_data may be InvoiceEntities object or plain dict
+                if hasattr(invoice, "line_items"):
+                    line_items = invoice.line_items
+                elif isinstance(invoice, dict):
+                    line_items = invoice.get("line_items", [])
+                else:
+                    line_items = []
+                rows = []
+                for item in line_items:
+                    if isinstance(item, dict):
+                        rows.append({
+                            "description": item.get("description"),
+                            "amount": item.get("amount"),
+                            "quantity": item.get("quantity"),
+                            "unit_price": item.get("unit_price"),
+                            "gst_rate": item.get("gst_rate"),
+                            "document_name": doc.get("file_name", "unknown"),
+                        })
+                    else:
+                        rows.append({
+                            "description": item.description,
+                            "amount": item.amount,
+                            "quantity": item.quantity,
+                            "unit_price": item.unit_price,
+                            "gst_rate": item.gst_rate,
+                            "document_name": doc.get("file_name", "unknown"),
+                        })
                 if rows:
                     dfs_to_combine.append(pd.DataFrame(rows))
 
@@ -535,6 +611,11 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
 
         if not expense_df.empty:
             employee_monthly_spend = _employee_monthly_spend(expense_df)
+            split_billed_vendors = {
+                str(f.evidence.get("vendor", "")).lower()
+                for f in anomalies
+                if isinstance(f, AnomalyFinding) and f.finding_type == "split_billing"
+            }
             for _, row in expense_df.iterrows():
                 expense_payload = row.to_dict()
 
@@ -549,6 +630,12 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
 
                 violation = rules_engine.check_expense_limits(expense_payload, rules_engine.policy)
                 if violation:
+                    # Suppress category_daily_limit if this row is already covered
+                    # by a split_billing finding — avoids double-flagging same transactions
+                    if violation.rule_name == "expense_category_daily_limit":
+                        row_desc = str(expense_payload.get("description", "")).lower()
+                        if any(sv and sv in row_desc for sv in split_billed_vendors):
+                            continue
                     expense_violations.append(violation)
 
         all_vendor_candidates: set[tuple[str, str]] = set()
@@ -655,7 +742,14 @@ def explain_node(state: AgentState) -> dict[str, Any]:
             report_id="preview",
             generated_at="",
             documents_processed=len(state.get("files", [])),
-            total_transactions=len(state.get("combined_df", state.get("transactions", []))),
+            total_transactions=(
+    sum(
+        len(doc.get("data")) if isinstance(doc.get("data"), pd.DataFrame) else 0
+        for doc in state.get("parsed_documents", [])
+        if doc.get("document_type") in ("bank_statement", "expense_sheet")
+    )
+    or len(state.get("transactions", []))
+),
             total_invoices=len(state.get("invoices", [])),
             risk_score=0.0,
             anomalies=anomalies,
@@ -687,12 +781,53 @@ def compile_report_node(state: AgentState) -> dict[str, Any]:
 
     all_findings = anomalies + violations
 
-    high_count = sum(1 for finding in all_findings if finding.severity == "HIGH")
-    medium_count = sum(1 for finding in all_findings if finding.severity == "MEDIUM")
-    low_count = sum(1 for finding in all_findings if finding.severity == "LOW")
+    # Separate anomalies from policy violations for weighted scoring
+    anomaly_findings = [f for f in all_findings if isinstance(f, AnomalyFinding)]
+    violation_findings = [f for f in all_findings if isinstance(f, PolicyViolation)]
 
-    base = (high_count * 25) + (medium_count * 10) + (low_count * 3)
-    risk_score = min(100.0, round((base / 300) * 100, 1))
+    # Weight anomalies by their actual score, not just severity count
+    HIGH_WEIGHT = 18
+    MEDIUM_WEIGHT = 6
+    LOW_WEIGHT = 2
+
+    # Anomalies: weight by score magnitude to avoid noise inflating the total
+    anomaly_score_sum = 0.0
+    for f in anomaly_findings:
+        if f.severity == "HIGH":
+            anomaly_score_sum += HIGH_WEIGHT * float(f.score)
+        elif f.severity == "MEDIUM":
+            # Multivariate and IQR-only findings get half weight
+            is_low_confidence = f.finding_type in ("multivariate_anomaly",) or (
+                isinstance(f.evidence, dict) and not f.evidence.get("z_method_flag", True)
+            )
+            weight = MEDIUM_WEIGHT * 0.5 if is_low_confidence else MEDIUM_WEIGHT
+            anomaly_score_sum += weight * float(f.score)
+        else:
+            anomaly_score_sum += LOW_WEIGHT * float(f.score)
+
+    # Policy violations are more definitive — weight higher
+    violation_score_sum = 0.0
+    for f in violation_findings:
+        sev = str(f.severity).upper()
+        if sev == "HIGH":
+            violation_score_sum += HIGH_WEIGHT * 1.2
+        elif sev == "MEDIUM":
+            violation_score_sum += MEDIUM_WEIGHT * 1.0
+        else:
+            violation_score_sum += LOW_WEIGHT
+
+    raw_score = anomaly_score_sum + violation_score_sum
+
+    # Normalize: 300 raw points = 100 risk score, with diminishing returns above 50
+    normalized = (raw_score / 300) * 100
+    if normalized > 50:
+        normalized = 50 + (normalized - 50) * 0.5
+
+    risk_score = min(100.0, round(normalized, 1))
+
+    high_count = sum(1 for f in all_findings if str(f.severity).upper() == "HIGH")
+    medium_count = sum(1 for f in all_findings if str(f.severity).upper() == "MEDIUM")
+    low_count = sum(1 for f in all_findings if str(f.severity).upper() == "LOW")
 
     reconciliation = state.get("reconciliation", {})
     unmatched_invoices_raw = reconciliation.get("unmatched_invoices", [])
@@ -724,7 +859,14 @@ def compile_report_node(state: AgentState) -> dict[str, Any]:
         report_id=str(uuid.uuid4()),
         generated_at=datetime.now().isoformat(),
         documents_processed=len(state.get("files", [])),
-        total_transactions=len(state.get("combined_df", state.get("transactions", []))),
+        total_transactions=(
+    sum(
+        len(doc.get("data")) if isinstance(doc.get("data"), pd.DataFrame) else 0
+        for doc in state.get("parsed_documents", [])
+        if doc.get("document_type") in ("bank_statement", "expense_sheet")
+    )
+    or len(state.get("transactions", []))
+),
         gst_transaction_count=gst_transaction_count,
         combined_transaction_count=int(state.get("combined_transaction_count", 0) or 0),
         total_invoices=len(state.get("invoices", [])),
@@ -1010,7 +1152,7 @@ def _top_concerns(
                 "id": item.violation_id,
                 "type": item.rule_name,
                 "severity": str(item.severity).upper(),
-                "score": float(item.amount_involved or 0.0),
+                "score": 0.85 if item.severity == "HIGH" else 0.65 if item.severity == "MEDIUM" else 0.45,
                 "summary": item.description,
             }
         )

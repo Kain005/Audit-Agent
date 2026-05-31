@@ -12,3 +12,8 @@ debug*
 *.log
 venv/
 .venv/
+# Additional
+generate*
+quick_test*
+paddle_debug_output*
+job_id*

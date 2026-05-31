@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest import result
 
 from .llm_bank_parser import parse_image_pdf_with_llm
 import pandas as pd
@@ -88,26 +89,49 @@ class DocumentRouter:
                 result["data"] = data
                 result["parser_used"] = "ImagePDFParser" if pdf_type == "image_pdf" else "PDFParser"
 
-                if gst_invoice_parser.looks_like_gst_invoice_pdf(str(path)):
-                    try:
-                        invoice_entities = gst_invoice_parser.parse_pdf(str(path))
-                        result["document_type"] = "gst_invoice"
-                        result["invoice_data"] = invoice_entities.model_dump()
-                        result["data"] = pd.DataFrame()
-                        result["parser_used"] = "GSTInvoiceParser"
-                        return result
-                    except Exception as exc:
-                        result["parse_errors"].append(f"GSTInvoiceParser failed: {exc}")
-
+                # WITH THIS (invoice check first, GST only if invoice check fails):
                 if self._looks_like_invoice(path.name, raw_text):
+                    # Check GST specifically only if it passes the stricter GST test
+                    if gst_invoice_parser.looks_like_gst_invoice_pdf(str(path)):
+                        try:
+                            invoice_entities = gst_invoice_parser.parse_pdf(str(path))
+                            result["document_type"] = "gst_invoice"
+                            result["invoice_data"] = llm_result["invoice_data"].model_dump() if hasattr(llm_result["invoice_data"], "model_dump") else llm_result["invoice_data"]
+                            result["data"] = pd.DataFrame()
+                            result["parser_used"] = "GSTInvoiceParser"
+                            return result
+                        except Exception as exc:
+                            result["parse_errors"].append(f"GSTInvoiceParser failed: {exc}")
+                            # Fall through to regular invoice parser below
+
                     llm_result = self.invoice_parser.parse_pdf_with_llm(str(path))
                     if "error" in llm_result:
-                        result["document_type"] = "invoice_error"
-                        result["parse_errors"].append(llm_result["error"])
-                        result["parser_used"] = "InvoiceParser"
+                        from extraction.models import InvoiceEntities, LineItem
+                        regex_df = self.invoice_parser.parse_pdf(str(path))
+                        first_row = regex_df.iloc[0].to_dict() if not regex_df.empty else {}
+                        invoice_entities = InvoiceEntities(
+                            vendor_name=str(first_row.get("vendor") or ""),
+                            invoice_number=str(first_row.get("invoice_number") or ""),
+                            invoice_date=str(first_row.get("date") or ""),
+                            subtotal=first_row.get("amount"),
+                            gst_amount=first_row.get("tax"),
+                            total_amount=first_row.get("total"),
+                            currency="INR",
+                            line_items=[LineItem(
+                                description=str(first_row.get("vendor") or "Invoice total"),
+                                quantity=None,
+                                unit_price=None,
+                                amount=first_row.get("total") or first_row.get("amount") or 0.0,
+                                gst_rate=None,
+                            )] if not regex_df.empty else [],
+                        )
+                        result["document_type"] = "invoice"
+                        result["invoice_data"] = invoice_entities.model_dump()
+                        result["data"] = pd.DataFrame()
+                        result["parser_used"] = "InvoiceParserRegex"
                     else:
                         result["document_type"] = "invoice"
-                        result["invoice_data"] = llm_result["invoice_data"]
+                        result["invoice_data"] = llm_result["invoice_data"].model_dump() if hasattr(llm_result["invoice_data"], "model_dump") else llm_result["invoice_data"]
                         result["data"] = pd.DataFrame()
                         result["parser_used"] = "InvoiceParserLLM"
                     return result

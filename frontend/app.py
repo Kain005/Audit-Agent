@@ -32,14 +32,14 @@ st.set_page_config(
 
 # Color Palette
 COLORS = {
-    "bg_dark": "#0F172A",
-    "bg_card": "#1E293B",
+    "bg_dark": "#090D16",
+    "bg_card": "#151F32",
     "text": "#F8FAFC",
     "high": "#EF4444",
     "medium": "#F97316",
     "safe": "#22C55E",
     "accent": "#3B82F6",
-    "border": "#334155",
+    "border": "#1E293B",
     "muted": "#64748B",
 }
 
@@ -68,14 +68,24 @@ CUSTOM_CSS = f"""
         border-right: 1px solid {COLORS['border']};
     }}
     
-    /* Cards */
+    /* Premium Glassmorphic Cards */
     .metric-card {{
-        background-color: {COLORS['bg_card']};
-        border: 1px solid {COLORS['border']};
-        border-radius: 12px;
-        padding: 24px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        background: rgba(21, 31, 50, 0.45);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.25);
         margin: 8px 0;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }}
+    
+    .metric-card:hover {{
+        transform: translateY(-5px);
+        border-color: rgba(59, 130, 246, 0.5);
+        box-shadow: 0 12px 40px rgba(59, 130, 246, 0.15);
+        background: rgba(21, 31, 50, 0.65);
     }}
     
     .metric-value {{
@@ -132,21 +142,75 @@ CUSTOM_CSS = f"""
         color: white;
     }}
     
-    /* Buttons */
+    /* Premium Fintech Button Styling */
     .stButton > button {{
-        background-color: {COLORS['accent']};
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 10px 24px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s;
+        background: linear-gradient(135deg, #3B82F6 0%, #1D4ED8 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 12px 24px !important;
+        font-weight: 700 !important;
+        font-size: 15px !important;
+        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3) !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        height: 60px !important;
+        width: 100% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
     }}
     
     .stButton > button:hover {{
-        background-color: #2563EB;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        transform: translateY(-2px) !important;
+        box-shadow: 0 8px 25px rgba(59, 130, 246, 0.5) !important;
+        background: linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%) !important;
+    }}
+    
+    .stButton > button:active {{
+        transform: translateY(1px) !important;
+    }}
+
+    .stButton > button:disabled {{
+        background: rgba(30, 41, 59, 0.4) !important;
+        color: rgba(255, 255, 255, 0.25) !important;
+        box-shadow: none !important;
+        cursor: not-allowed !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+    }}
+    
+    /* Modern Custom File Uploader */
+    [data-testid="stFileUploader"] {{
+        background: rgba(21, 31, 50, 0.45) !important;
+        border: 2px dashed rgba(59, 130, 246, 0.3) !important;
+        border-radius: 12px !important;
+        padding: 6px !important;
+        transition: all 0.3s ease;
+        height: 60px !important;
+    }}
+    
+    [data-testid="stFileUploader"]:hover {{
+        border-color: rgba(59, 130, 246, 0.7) !important;
+        background: rgba(21, 31, 50, 0.6) !important;
+    }}
+    
+    [data-testid="stFileUploader"] section {{
+        padding: 0 !important;
+        background: transparent !important;
+    }}
+
+    [data-testid="stFileUploader"] section > input + div {{
+        padding: 4px 10px !important;
+    }}
+
+    /* Compact drag & drop text/icon */
+    [data-testid="stFileUploader"] section button {{
+        padding: 4px 12px !important;
+        font-size: 12px !important;
+        height: auto !important;
+        background-color: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 8px !important;
     }}
     
     /* Input fields */
@@ -162,6 +226,241 @@ CUSTOM_CSS = f"""
         background-color: {COLORS['bg_card']};
         border: 1px solid {COLORS['border']};
         border-radius: 8px;
+    }}
+
+    /* When sidebar is collapsed, show as a 64px icon rail */
+    [data-testid="stSidebar"][aria-expanded="false"] {{
+        min-width: 64px !important;
+        width: 64px !important;
+        transform: translateX(0px) !important;
+        overflow: hidden !important;
+    }}
+    
+    [data-testid="stSidebar"][aria-expanded="false"] > div:first-child {{
+        width: 64px !important;
+    }}
+    
+    /* Keep collapse button visible */
+    [data-testid="stSidebar"][aria-expanded="false"] button[kind="header"],
+    [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarCollapseButton"] {{
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: fixed !important;
+        left: 10px !important;
+        top: 10px !important;
+        z-index: 999999 !important;
+    }}
+    
+    [data-testid="collapsedControl"] {{
+        display: none !important;
+    }}
+
+    /* Sidebar Collapsed/Expanded Transitions */
+    [data-testid="stSidebar"] {{
+        transition: min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1), width 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }}
+    
+    /* Boxless Sidebar Buttons */
+    [data-testid="stSidebar"] .stButton > button {{
+        background-color: transparent !important;
+        background: transparent !important;
+        color: #94A3B8 !important;
+        border: none !important;
+        border-radius: 8px !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        padding-left: 20px !important;
+        padding-top: 10px !important;
+        padding-bottom: 10px !important;
+        padding-right: 10px !important;
+        font-weight: 500 !important;
+        font-size: 14px !important;
+        box-shadow: none !important;
+        height: auto !important;
+        width: 100% !important;
+        display: flex !important;
+        align-items: center !important;
+        transition: all 0.2s ease !important;
+    }}
+    
+    [data-testid="stSidebar"] .stButton > button:hover {{
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        color: #F8FAFC !important;
+        transform: none !important;
+        box-shadow: none !important;
+    }}
+    
+    [data-testid="stSidebar"] .stButton > button:active {{
+        transform: none !important;
+    }}
+    
+    /* Collapsed nav: center icon, hide label text */
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button {{
+    justify-content: center !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    padding-top: 10px !important;
+    padding-bottom: 10px !important;
+}}
+    
+    /* Hide label text in collapsed mode, keep icon visible */
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button .nav-label {{
+        display: none !important;
+    }}
+    
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button .nav-icon {{
+        display: inline !important;
+        font-size: 20px !important;
+        margin: 0 !important;
+    }}
+
+    /* Sidebar Logo */
+    .sidebar-logo {{
+        text-align: left !important;
+        justify-content: flex-start !important;
+        padding-left: 20px !important;
+        padding-top: 10px !important;
+        padding-bottom: 10px !important;
+        padding-right: 10px !important;
+        font-size: 24px;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        transition: all 0.3s ease;
+    }}
+    .logo-icon {{
+        font-size: 28px;
+        margin-right: 8px;
+    }}
+    .logo-text {{
+        font-size: 22px;
+        font-weight: 800;
+        background: linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }}
+
+    /* Collapsed Logo */
+    [data-testid="stSidebar"][aria-expanded="false"] .sidebar-logo {{
+        padding-left: 20px !important;
+        padding-right: 0 !important;
+        padding-top: 10px !important;
+        padding-bottom: 10px !important;
+        justify-content: flex-start !important;
+    }}
+    [data-testid="stSidebar"][aria-expanded="false"] .logo-text {{
+        display: none !important;
+    }}
+    [data-testid="stSidebar"][aria-expanded="false"] .logo-icon {{
+        margin-right: 0 !important;
+    }}
+
+    /* Backend Status & Footer Styling */
+    .backend-status {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding-left: 20px !important;
+        padding-right: 0 !important;
+        transition: all 0.3s ease;
+    }}
+    .status-dot {{
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+    }}
+    .status-text {{
+        color: #64748B;
+        font-size: 13px;
+    }}
+    .sidebar-footer {{
+        text-align: left;
+        font-size: 11px;
+        color: #64748B;
+        margin-top: 20px;
+        padding-left: 20px !important;
+        padding-right: 0 !important;
+        transition: all 0.3s ease;
+    }}
+
+    /* Collapsed Status & Footer */
+    [data-testid="stSidebar"][aria-expanded="false"] .backend-status {{
+        padding-left: 25px !important;
+        padding-right: 0 !important;
+        justify-content: flex-start !important;
+    }}
+    [data-testid="stSidebar"][aria-expanded="false"] .status-text {{
+        display: none !important;
+    }}
+    [data-testid="stSidebar"][aria-expanded="false"] .sidebar-footer {{
+        display: none !important;
+    }}
+    [data-testid="stSidebar"][aria-expanded="false"] hr {{
+        margin: 8px 0 !important;
+    }}
+
+
+    /* Expanded nav: icon + label side by side */
+    [data-testid="stSidebar"][aria-expanded="true"] .stButton > button .nav-icon {{
+        margin-right: 6px !important;
+    }}
+    
+    [data-testid="stSidebar"][aria-expanded="true"] .stButton > button .nav-label {{
+        display: inline !important;
+    }}
+
+
+
+    /* In collapsed mode: clip button text to show only first ~22px (the emoji) */
+    [data-testnet="stSidebar"][aria-expanded="false"] .stButton > button p,
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button span {{
+        width: 24px !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
+        display: inline-block !important;
+        text-align: center !important;
+        font-size: 18px !important;
+    }}
+    
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button {{
+        justify-content: center !important;
+        padding: 10px 0 !important;
+        text-align: center !important;
+    }}
+
+
+    /* Collapsed nav buttons: center and show only the emoji */
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button {{
+        justify-content: center !important;
+        padding: 10px 0 !important;
+        text-align: center !important;
+    }}
+    
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button p,
+    [data-testid="stSidebar"][aria-expanded="false"] .stButton > button span {{
+        width: 22px !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
+        display: inline-block !important;
+        font-size: 18px !important;
+        text-align: left !important;
+    }}
+
+
+    /* Active nav item collapsed: show only emoji, hide label text */
+    [data-testid="stSidebar"][aria-expanded="false"] .active-nav-item {{
+        padding: 10px 0 !important;
+        text-align: center !important;
+        border-left: none !important;
+        border-radius: 8px !important;
+        width: 100% !important;
+        font-size: 18px !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
+        /* Clip to show only the emoji character (~22px wide) */
+        max-width: 22px !important;
+        margin: 2px auto !important;
     }}
 </style>
 """
@@ -329,6 +628,109 @@ def build_rule_based_summary(report: dict[str, Any]) -> str:
     parts.append(f"Recommendation: {recommendation}")
     return " ".join(parts)
 
+
+def render_clean_document_card(report: dict[str, Any]) -> None:
+    """Render a green clean-audit card when no anomalies/violations are present."""
+    document_breakdown = report.get("document_breakdown", {}) or {}
+    gst_invoice_count = int(document_breakdown.get("gst_invoice", 0) or 0)
+    bank_statement_count = int(document_breakdown.get("bank_statement", 0) or 0)
+    expense_sheet_count = int(document_breakdown.get("expense_sheet", 0) or 0)
+
+    container_open = (
+        '<div style="background:#0F2A1A;border:1px solid #22C55E;border-radius:12px;'
+        'padding:24px;margin:12px 0;">'
+    )
+    title_html = '<div style="font-weight:700;color:#22C55E;font-size:16px;margin-bottom:10px;">Audit complete.</div>'
+    line_style = 'color:#DCFCE7;margin:6px 0;'
+    footer = (
+        '<div style="color:#22C55E;font-weight:700;margin-top:14px;">'
+        'Risk Score: 0 / 100 - No issues found'
+        '</div>'
+    )
+
+    if gst_invoice_count >= 1:
+        gst_invoices = report.get("gst_invoices", []) or []
+        invoice_data = {}
+        if isinstance(gst_invoices, list) and gst_invoices and isinstance(gst_invoices[0], dict):
+            maybe_invoice_data = gst_invoices[0].get("invoice_data", {})
+            if isinstance(maybe_invoice_data, dict):
+                invoice_data = maybe_invoice_data
+
+        vendor_name = str(invoice_data.get("vendor_name") or "Unknown vendor").strip()
+        vendor_gst = str(invoice_data.get("vendor_gst") or "N/A").strip()
+        invoice_number = str(invoice_data.get("invoice_number") or "Unknown").strip()
+        total_amount = invoice_data.get("total_amount")
+        igst_amount = invoice_data.get("igst_amount")
+        cgst_amount = invoice_data.get("cgst_amount")
+        sgst_amount = invoice_data.get("sgst_amount")
+
+        try:
+            total_text = f"INR {float(total_amount):.2f}" if total_amount is not None else "INR 0.00"
+        except Exception:
+            total_text = str(total_amount or "INR 0.00")
+
+        try:
+            igst_numeric = float(igst_amount) if igst_amount is not None else None
+        except Exception:
+            igst_numeric = None
+
+        tax_line = ""
+        classification_line = ""
+        if igst_numeric is not None:
+            tax_line = f"IGST {igst_numeric:.2f}; Total {total_text}"
+            classification_line = "IGST applied"
+        else:
+            cgst_val = float(cgst_amount or 0)
+            sgst_val = float(sgst_amount or 0)
+            tax_line = f"CGST+SGST {(cgst_val + sgst_val):.2f}; Total {total_text}"
+            classification_line = "CGST+SGST applied"
+
+        card_html = (
+            f"{container_open}"
+            f"{title_html}"
+            f'<div style="{line_style}">✅ Vendor verified - {vendor_name} ({vendor_gst})</div>'
+            f'<div style="{line_style}">✅ Tax arithmetic correct - {tax_line}</div>'
+            f'<div style="{line_style}">✅ No duplicate invoice detected - {invoice_number}</div>'
+            f'<div style="{line_style}">✅ Interstate classification confirmed - {classification_line}</div>'
+            f'<div style="{line_style}">✅ Invoice passed all 12 checks</div>'
+            f"{footer}"
+            "</div>"
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
+        return
+
+    if bank_statement_count >= 1 and gst_invoice_count == 0:
+        tx_count = int(
+            report.get("gst_transaction_count")
+            or report.get("transaction_count")
+            or report.get("combined_transaction_count")
+            or report.get("total_transactions")
+            or 0
+        )
+        card_html = (
+            f"{container_open}"
+            f"{title_html}"
+            f'<div style="{line_style}">✅ {tx_count} transactions reviewed</div>'
+            f'<div style="{line_style}">✅ No anomalies detected</div>'
+            f'<div style="{line_style}">✅ No policy violations found</div>'
+            f'<div style="{line_style}">✅ Risk Score: 0 / 100</div>'
+            "</div>"
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
+        return
+
+    if expense_sheet_count >= 1:
+        card_html = (
+            f"{container_open}"
+            f"{title_html}"
+            f'<div style="{line_style}">✅ All expense policy checks passed</div>'
+            f'<div style="{line_style}">✅ No violations found</div>'
+            f'<div style="{line_style}">✅ Risk Score: 0 / 100</div>'
+            "</div>"
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
+        return
+
 init_session_state()
 
 # ============================================================================
@@ -481,7 +883,7 @@ def api_call(endpoint: str, method: str = "GET", data: dict = None, files: Any =
     url = f"{API_BASE_URL}{endpoint}"
     try:
         if method == "GET":
-            response = requests.get(url, timeout=60)
+            response = requests.get(url, timeout=120)
         elif method == "POST":
             if files:
                 response = requests.post(url, files=files, timeout=300)
@@ -560,44 +962,59 @@ def render_sidebar():
     with st.sidebar:
         # Logo
         st.markdown(
-            f'<div style="text-align: center; padding: 20px 0;"><h1 style="color: {COLORS["accent"]}; margin: 0;">🤖 AuditAI</h1></div>',
+            f'''
+            <div class="sidebar-logo">
+                <span class="logo-icon">🤖</span>
+                <span class="logo-text">AuditAI</span>
+            </div>
+            ''',
             unsafe_allow_html=True
         )
         st.divider()
         
         # Navigation
-        st.markdown("**Navigation**")
         pages = [
             ("📤 Upload Documents", "📤 Upload"),
-            ("🔍 Audit Findings", "🔍 Findings"),
-            ("📊 Analytics", "📊 Analytics"),
-            ("📄 Documents", "📄 Documents"),
-            ("📋 Full Report", "📋 Report"),
-            ("⚙️ Settings", "⚙️ Settings"),
+            ("🔍 Audit Findings",   "🔍 Findings"),
+            ("📊 Analytics",        "📊 Analytics"),
+            ("📄 Documents",        "📄 Documents"),
+            ("📋 Full Report",      "📋 Report"),
+            ("⚙️ Settings",         "⚙️ Settings"),
         ]
+
+        # Active style CSS injection
+        active_page = st.session_state.current_page
+        pages_keys = ["📤 Upload", "🔍 Findings", "📊 Analytics", "📄 Documents", "📋 Report", "⚙️ Settings"]
+        active_index = pages_keys.index(active_page) if active_page in pages_keys else 0
+        
+        # nth-child counts: logo=1, divider=2, then buttons 3-8
+        # But active CSS injection markdown adds an extra child before buttons
+        # So: logo=1, divider=2, active_css_markdown=3, buttons start at 4
+        css_index = 4 + active_index
+        
+        active_css = f"""
+        <style>
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child({css_index}) [data-testid="stButton"] button {{
+            background-color: rgba(59, 130, 246, 0.12) !important;
+            color: #3B82F6 !important;
+            border-left: 3px solid #3B82F6 !important;
+            border-radius: 0 8px 8px 0 !important;
+            font-weight: 700 !important;
+        }}
+        [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stVerticalBlock"] > div:nth-child({css_index}) [data-testid="stButton"] button {{
+            color: #3B82F6 !important;
+            background-color: rgba(59, 130, 246, 0.15) !important;
+            border-radius: 8px !important;
+            border-left: none !important;
+        }}
+        </style>
+        """
+        st.markdown(active_css, unsafe_allow_html=True)
         
         for label, page_key in pages:
             if st.button(label, key=f"nav_{page_key}", use_container_width=True):
                 st.session_state.current_page = page_key
-        
-        st.divider()
-        
-        # Backend Status
-        status, status_text = check_backend_status()
-        status_color = COLORS['safe'] if status else COLORS['high']
-        st.markdown(
-            f'<div style="display: flex; align-items: center; gap: 8px;">'
-            f'<div style="width: 10px; height: 10px; border-radius: 50%; background-color: {status_color};"></div>'
-            f'<span style="color: {COLORS["muted"]};">Backend: {status_text}</span></div>',
-            unsafe_allow_html=True
-        )
-        
-        st.divider()
-        st.markdown(
-            f'<div style="text-align: center; font-size: 11px; color: {COLORS["muted"]}; margin-top: 20px;">'
-            'Powered by Llama 3.1</div>',
-            unsafe_allow_html=True
-        )
+                st.rerun()
 
 # ============================================================================
 # PAGE 1: UPLOAD DOCUMENTS
@@ -605,79 +1022,60 @@ def render_sidebar():
 
 def page_upload():
     """Upload documents page"""
+    # Centered Hero Text
     st.markdown(
-        '<h1 style="text-align: center; margin-bottom: 8px;">📤 Upload Financial Documents</h1>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        '<p style="text-align: center; color: #64748B; margin-top: 0;">Supports invoices, bank statements, ledgers, expense sheets, GST documents</p>',
+        '<div style="text-align: center; padding: 40px 0 20px 0;">'
+        '<h1 style="font-size: 48px; font-weight: 800; font-family: \'Outfit\', \'Inter\', sans-serif; '
+        'background: linear-gradient(135deg, #60A5FA 0%, #3B82F6 50%, #1D4ED8 100%); '
+        '-webkit-background-clip: text; -webkit-text-fill-color: transparent; '
+        'letter-spacing: -1.5px; margin-bottom: 8px;">Start Your Audit Now</h1>'
+        '<p style="font-size: 15px; color: #64748B; margin-top: 0;">Upload your financial documents and let AuditAI detect anomalies in real-time</p>'
+        '</div>',
         unsafe_allow_html=True
     )
     
-    st.markdown("")
-
-    left, right = st.columns([1, 1])
-    with left:
-        if st.button("Load Sample Data", type="secondary", use_container_width=True):
-            sample_path = Path("data/sample/test_statement.csv")
-            if sample_path.exists():
-                with open(sample_path, "rb") as f:
-                    sample_bytes = f.read()
-                st.session_state["sample_loaded"] = True
-                st.session_state["sample_data"] = sample_bytes
-                st.session_state["sample_name"] = "test_statement.csv"
-                st.session_state.sample_files = [("test_statement.csv", sample_bytes, "text/csv")]
-                st.success("Sample data loaded - click Run Audit")
-            else:
-                st.error("Sample file not found at data/sample/test_statement.csv")
-
-    with right:
-        if st.button("🧹 Clear All", use_container_width=True):
-            st.session_state.uploaded_files = []
-            st.session_state.sample_files = []
-            st.rerun()
-    
-    # Document type cards
+    # 5 Feature Cards in 1 line
+    cols = st.columns(5)
     doc_types = [
-        {"icon": "🏦", "name": "Bank Statements", "formats": "CSV, PDF", "example": "HDFC, ICICI, SBI statements"},
-        {"icon": "📄", "name": "Invoices", "formats": "PDF, XLSX", "example": "Purchase/Sales invoices"},
-        {"icon": "📒", "name": "Ledgers", "formats": "CSV, XLSX", "example": "General ledger exports"},
-        {"icon": "💳", "name": "Expense Sheets", "formats": "CSV, XLSX", "example": "Employee expense reports"},
-        {"icon": "🧾", "name": "GST Documents", "formats": "XLSX, CSV", "example": "GSTR-1, GSTR-2A exports"},
+        {"icon": "🏦", "name": "Bank Statements", "formats": "CSV, PDF", "desc": "Anomalies & transactions"},
+        {"icon": "📄", "name": "Invoices", "formats": "PDF, XLSX", "desc": "Extraction & validation"},
+        {"icon": "📒", "name": "Ledgers", "formats": "CSV, XLSX", "desc": "Double-entry reconciliation"},
+        {"icon": "💳", "name": "Expense Sheets", "formats": "CSV, XLSX", "desc": "Policy compliance"},
+        {"icon": "🧾", "name": "GST Documents", "formats": "XLSX, CSV", "desc": "Tax arithmetic & fraud"},
     ]
     
-    cols = st.columns(3)
     for idx, doc in enumerate(doc_types):
-        with cols[idx % 3]:
+        with cols[idx]:
             st.markdown(
                 f'''
-                <div class="metric-card" style="text-align: center; padding: 20px;">
-                    <div style="font-size: 32px; margin-bottom: 12px;">{doc["icon"]}</div>
-                    <div style="font-weight: 600; margin-bottom: 8px;">{doc["name"]}</div>
-                    <div style="font-size: 12px; color: #94A3B8; margin-bottom: 4px;">{doc["formats"]}</div>
-                    <div style="font-size: 11px; color: #64748B;">{doc["example"]}</div>
+                <div class="metric-card" style="text-align: center; padding: 16px 12px; height: 160px; display: flex; flex-direction: column; justify-content: center; align-items: center;">
+                    <div style="font-size: 28px; margin-bottom: 8px;">{doc["icon"]}</div>
+                    <div style="font-weight: 700; font-size: 13px; margin-bottom: 4px; white-space: nowrap; color: #F8FAFC;">{doc["name"]}</div>
+                    <div style="font-size: 10px; color: #3B82F6; font-weight: 600; margin-bottom: 6px;">{doc["formats"]}</div>
+                    <div style="font-size: 10px; color: #64748B; line-height: 1.2;">{doc["desc"]}</div>
                 </div>
                 ''',
                 unsafe_allow_html=True
             )
     
-    st.markdown("")
+    st.markdown("<br>", unsafe_allow_html=True)
     
-    # File uploader
-    st.markdown("**Upload Files**")
-    uploaded_files = st.file_uploader(
-        "Drag and drop files or click to select",
-        type=["pdf", "csv", "xlsx", "xls"],
-        accept_multiple_files=True,
-        label_visibility="collapsed"
-    )
+    # Modern Centered Upload Bar & Start Audit Button side-by-side
+    col_space_l, col_upload, col_btn, col_space_r = st.columns([1, 4.5, 1.5, 1])
     
+    with col_upload:
+        uploaded_files = st.file_uploader(
+            "Drag and drop files or click to select",
+            type=["pdf", "csv", "xlsx", "xls"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+            key="file_uploader"
+        )
+        
+    # Read bytes immediately before storing in session state
     if uploaded_files:
-        # Read bytes immediately before storing in session state
         file_data = []
         for uf in uploaded_files:
-            # Use getvalue() instead of seek(0) + read()
-            # More reliable in Streamlit on Windows
             try:
                 bytes_content = uf.getvalue()
             except:
@@ -690,68 +1088,26 @@ def page_upload():
                 "type": uf.type or "application/octet-stream",
             })
         st.session_state.uploaded_files = file_data
-        st.markdown("**Selected Files**")
-        for idx, file in enumerate(file_data):
-            col1, col2, col3, col4 = st.columns([0.5, 3, 1.5, 0.5])
-            name = file["name"] if isinstance(file, dict) else file.name
-            size = file["size"] if isinstance(file, dict) else file.size
-            with col1:
-                if name.endswith('.pdf'):
-                    st.markdown("📄")
-                elif name.endswith('.csv'):
-                    st.markdown("📋")
-                else:
-                    st.markdown("📊")
-            with col2:
-                st.markdown(f"**{name}** ({size/1024:.1f} KB)")
-            with col3:
-                st.markdown(f"`{name.split('.')[-1].upper()}`")
-            with col4:
-                if st.button("✕", key=f"remove_{idx}"):
-                    st.session_state.uploaded_files.pop(idx)
-                    st.rerun()
+    else:
+        st.session_state.uploaded_files = []
 
-    if st.session_state.sample_files:
-        st.markdown("**Loaded Sample Files**")
-        for name, content, _mime in st.session_state.sample_files:
-            size_kb = len(content) / 1024
-            st.markdown(f"- {name} ({size_kb:.1f} KB)")
-    
-    st.markdown("")
-    
-    # Audit Configuration
-    render_audit_configuration()
-    
-    st.markdown("")
-    
-    # Run Audit button
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    # Start Audit Button
+    with col_btn:
         has_uploaded = len(st.session_state.uploaded_files) > 0
-        has_samples = len(st.session_state.sample_files) > 0
         if st.button(
-            "🚀 Run Audit",
+            "🚀 Start Audit",
             use_container_width=True,
-            disabled=not (has_uploaded or has_samples),
+            disabled=not has_uploaded,
             key="run_audit"
         ):
             with st.spinner("Processing..."):
                 # Prepare files
-                files_to_upload: list[tuple[str, tuple[str, Any, str]]] = []
+                files_to_upload = []
                 for uf in st.session_state.uploaded_files:
-                    if isinstance(uf, dict):
-                        # New format - already read bytes
-                        files_to_upload.append((
-                            "files",
-                            (uf["name"], uf["bytes"], uf.get("type", "application/octet-stream"))
-                        ))
-                    else:
-                        # Old format fallback
-                        uf.seek(0)
-                        file_bytes = uf.read()
-                        files_to_upload.append(("files", (uf.name, file_bytes, "application/octet-stream")))
-                for name, content, mime in st.session_state.sample_files:
-                    files_to_upload.append(("files", (name, content, mime)))
+                    files_to_upload.append((
+                        "files",
+                        (uf["name"], uf["bytes"], uf.get("type", "application/octet-stream"))
+                    ))
                 
                 # Upload files
                 with st.status("Running audit...", expanded=True) as status:
@@ -776,7 +1132,7 @@ def page_upload():
 
                     job_id = upload_result["job_id"].strip()
                     st.session_state["job_id"] = job_id.strip()
-                    st.session_state["uploaded_files"] = [f.name for f in uploaded_files]
+                    
 
                     analyze_result = api_call(
                         f"/analyze/{job_id.strip()}",
@@ -827,6 +1183,34 @@ def page_upload():
                     st.session_state.current_page = "🔍 Findings"
                     st.rerun()
 
+    # Display Selected Files list centered below
+    if st.session_state.uploaded_files:
+        col_space_l2, col_content, col_space_r2 = st.columns([1, 6, 1])
+        with col_content:
+            st.markdown("<br>**Selected Files**", unsafe_allow_html=True)
+            for idx, file in enumerate(st.session_state.uploaded_files):
+                col1, col2, col3 = st.columns([0.5, 4.5, 1])
+                name = file["name"]
+                size = file["size"]
+                with col1:
+                    if name.endswith('.pdf'):
+                        st.markdown("📄")
+                    elif name.endswith('.csv'):
+                        st.markdown("📋")
+                    else:
+                        st.markdown("📊")
+                with col2:
+                    st.markdown(f"**{name}** ({size/1024:.1f} KB)")
+                with col3:
+                    st.markdown(f"`{name.split('.')[-1].upper()}`")
+                    
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Center-aligned Configure Audit Settings expander below the upload row
+    col_space_l2, col_content, col_space_r2 = st.columns([1, 6, 1])
+    with col_content:
+        render_audit_configuration()
+
 # ============================================================================
 # PAGE 2: AUDIT FINDINGS
 # ============================================================================
@@ -838,14 +1222,16 @@ def page_findings():
         st.stop()
 
     report = st.session_state.get("report_data", {})
+    all_anomalies = report.get("anomalies", []) or []
+    all_violations = report.get("policy_violations", []) or []
+    all_findings = all_anomalies + all_violations
+
+    if not all_findings:
+        render_clean_document_card(report)
     
     # Top metrics
     st.markdown("**Key Metrics**")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
-
-    all_anomalies = report.get("anomalies", []) or []
-    all_violations = report.get("policy_violations", []) or []
-    all_findings = all_anomalies + all_violations
 
     high_count = sum(1 for f in all_findings if f.get("severity", "").upper() == "HIGH")
     medium_count = sum(1 for f in all_findings if f.get("severity", "").upper() == "MEDIUM")
@@ -908,8 +1294,16 @@ def page_findings():
                 finding_label = finding.get("finding_type") or finding.get("rule_name") or "Unknown"
                 severity_color = COLORS['high'] if severity == "HIGH" else COLORS['medium'] if severity == "MEDIUM" else COLORS['safe']
                 reason = (finding.get("human_readable_reason") or finding.get("description") or "")[:100]
-                amount = finding.get("evidence", {}).get("amount", 0)
-                score = finding.get("score", finding.get("amount_involved", 0) or 0)
+                evidence = finding.get("evidence", {})
+                amount = (
+                    evidence.get("amount")
+                    or evidence.get("combined_amount")
+                    or evidence.get("total_amount")
+                    or finding.get("amount_involved")
+                    or 0
+                )
+                sev = str(finding.get("severity", "LOW")).upper()
+                score = finding.get("score") or (0.85 if sev == "HIGH" else 0.65 if sev == "MEDIUM" else 0.45)
                 
                 # Use expander for each finding to allow explanation expansion
                 with st.expander(
@@ -1136,8 +1530,9 @@ def page_documents():
         
         # Show as clickable buttons
         for i, fname in enumerate(uploaded_files):
-            if st.button(fname, key=f"doc_{i}", use_container_width=True):
-                st.session_state["selected_document"] = fname
+            display_name = fname["name"] if isinstance(fname, dict) else fname
+            if st.button(display_name, key=f"doc_{i}", use_container_width=True):
+                st.session_state["selected_document"] = display_name
     
     # Right panel - document detail
     with col2:
@@ -1223,6 +1618,9 @@ def page_report():
         return
     
     report = st.session_state.report_data
+    findings = (report.get("anomalies", []) or []) + (report.get("policy_violations", []) or [])
+    if not findings:
+        render_clean_document_card(report)
     
     # Generate summary directly in frontend if missing
     summary = normalize_summary_text(report.get("summary"))

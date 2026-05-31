@@ -20,22 +20,30 @@ GSTIN_RE = re.compile(r"\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z0-9]", re.IGNORECASE)
 GST_KEYWORDS = ["CGST", "SGST", "IGST", "HSN", "SAC", "GSTIN", "TAX INVOICE"]
 
 
+
 def looks_like_gst_invoice_pdf(file_path: str) -> bool:
     try:
-        gstin_found = False
-        keyword_hits = 0
-
         with pdfplumber.open(file_path) as pdf:
-            pages = pdf.pages[:2]
             text_chunks: list[str] = []
-            for page in pages:
+            for page in pdf.pages[:2]:
                 text_chunks.append(page.extract_text() or "")
 
         text = "\n".join(text_chunks)
-        gstin_found = bool(GSTIN_RE.search(text))
         upper_text = text.upper()
+
+        # Must have at least vendor + buyer GSTIN (B2B invoice)
+        all_gstins = GSTIN_RE.findall(text)
+        if len(all_gstins) < 2:
+            return False
+
         keyword_hits = sum(1 for keyword in GST_KEYWORDS if keyword in upper_text)
-        return gstin_found and keyword_hits >= 2
+        if keyword_hits < 3:
+            return False
+
+        has_cgst_and_sgst = "CGST" in upper_text and "SGST" in upper_text
+        has_hsn_or_sac = "HSN" in upper_text or "SAC" in upper_text
+        return has_cgst_and_sgst or has_hsn_or_sac
+
     except Exception:
         return False
 

@@ -46,6 +46,20 @@ def resolve_debit_credit(
         elif upper.startswith("CR ") or upper.startswith("CR\t"):
             prefix_suffix = "CR"
             cell = cell[3:].strip()
+        # Strip leading row-number token e.g. "43 130.00" -> "130.00"
+        cell = re.sub(r'^\d{1,3}\s+', '', cell).strip()
+        # Normalize common OCR substitutions before matching
+        cell = cell.replace("D0", "00").replace("O0", "00").replace("0o", "00")
+        cell = cell.replace("Qu", "00").replace("uQ", "00").replace("uu", "00")
+        cell = cell.replace("Co", "00").replace("cO", "00").replace("co", "00")
+        cell = cell.replace("do", "00").replace("dO", "00")
+        cell = re.sub(r'[A-Za-z](?=\d)', '', cell)  # letter immediately before digit
+        cell = re.sub(r'(?<=\d)[A-Za-z]', '', cell)  # letter immediately after digit
+        # Normalize large whole numbers — OCR strips commas+decimal e.g. 942,184.41 -> 94218441
+        # Reinsert decimal point 2 places from right
+        if re.fullmatch(r'\d{5,}', cell.strip()):
+            raw = cell.strip()
+            cell = raw[:-2] + '.' + raw[-2:]
         # Find all clean currency patterns: digits with optional commas and decimal
         matches = list(re.finditer(r"\d[\d,]*\.\d{2}", cell))
         if not matches:
@@ -65,7 +79,7 @@ def resolve_debit_credit(
             val = float(amount_str)
         except ValueError:
             return 0.0, None
-        if val > 50_000_000:
+        if val > 500_000_000:
             return 0.0, None
         # Detect suffix after the amount match
         after = cell[matches[-1].end():].strip().upper()
@@ -134,6 +148,101 @@ def _detect_bank_from_ocr(pages: list[dict[str, Any]]) -> str:
     return _bsp.detect_bank(pd.DataFrame(), raw_text=combined)
 
 
+def _parse_raw_text_transactions(raw_text: str) -> list[dict]:
+    """Parse transactions from raw OCR text when dataframe extraction fails."""
+    import re
+    transactions = []
+    DATE_RE = re.compile(r"\b(\d{1,2}[-/]\d{2}[-/]\d{2,4})\b")
+    AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+
+    # Split on date patterns when text is a single blob (OCR page 1 style)
+    lines_raw = raw_text.splitlines()
+    if len(lines_raw) <= 2:
+        # re-split on every occurrence of a date pattern
+        segments = re.split(r'(?=\b\d{2}[-/]\d{2}[-/ ]\d{2,4}\b)', raw_text)
+        lines = [s.strip() for s in segments if s.strip()]
+    else:
+        lines = [l.strip() for l in lines_raw if l.strip()]
+    previous_balance = None
+
+    for line in lines:
+        dates = DATE_RE.findall(line)
+        if not dates:
+            continue
+        amounts = AMOUNT_RE.findall(line)
+        if not amounts:
+            continue
+        amounts_clean = []
+        for a in amounts:
+            try:
+                amounts_clean.append(float(a.replace(",", "")))
+            except ValueError:
+                continue
+        if not amounts_clean:
+            continue
+
+        date_value = _normalize_date(dates[0])
+        if not date_value:
+            try:
+                parsed_dt = pd.to_datetime(dates[0], dayfirst=True, errors="coerce")
+                date_value = parsed_dt.strftime("%Y-%m-%d") if pd.notna(parsed_dt) else None
+            except Exception:
+                pass
+        if not date_value:
+            # try extracting date from description field
+            desc_raw = str(row_dict.get(col_map.get("description", ""), "") or "").strip()
+            # normalize OCR noise in date e.g. 04-€8-2022 -> 04-08-2022
+            desc_clean = re.sub(r'[^\d\-/\s]', '0', desc_raw)
+            date_match = re.search(r"\b(\d{2}[-/]\d{2}[-/]\d{2,4})\b", desc_clean)
+            if date_match:
+                date_value = _normalize_date(date_match.group(1))
+                if not date_value:
+                    try:
+                        parsed_dt = pd.to_datetime(date_match.group(1), dayfirst=True, errors="coerce")
+                        date_value = parsed_dt.strftime("%Y-%m-%d") if pd.notna(parsed_dt) else None
+                    except Exception:
+                        pass
+            if not date_value:
+                if transactions:
+                    date_value = transactions[-1]["date"]
+                else:
+                    continue
+
+        balance = amounts_clean[-1] if len(amounts_clean) >= 1 else 0.0
+        debit = 0.0
+        credit = 0.0
+
+        if len(amounts_clean) >= 2:
+            amount = amounts_clean[-2]
+            if previous_balance is not None and balance > 0:
+                delta = round(balance - previous_balance, 2)
+                if delta > 0:
+                    credit = amount
+                else:
+                    debit = amount
+            else:
+                debit = amount
+
+        if balance > 0:
+            previous_balance = balance
+
+        desc_part = re.sub(r"\d[\d,]*\.\d{2}", "", line)
+        desc_part = re.sub(r"\b\d{1,2}[-/]\d{2}[-/]\d{2,4}\b", "", desc_part)
+        description = re.sub(r"\s+", " ", desc_part).strip()
+
+        transactions.append({
+            "date": date_value,
+            "description": description,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance,
+            "ref_no": "",
+            "tags": {},
+        })
+
+    return transactions
+
+
 def parse_bank_pdf(pdf_path: str) -> dict:
     """
     Parse a bank statement PDF and return transactions + metadata.
@@ -162,19 +271,31 @@ def parse_bank_pdf(pdf_path: str) -> dict:
     structured_pages: list[dict[str, Any] | None]
     if pdf_type == "image_pdf":
      structured_pages = [
-        {"page_number": p["page_number"], "dataframe": p.get("dataframe")}
+        {"page_number": p["page_number"], "dataframe": p.get("dataframe"), "raw_text": p.get("raw_text", "")}
         for p in pages_full
     ]
     else:
      structured_pages = extract_native_pdf_as_dataframe(pdf_path)
 
+    last_balance: float | None = None
     for page_result in structured_pages or []:
         if not page_result:
             continue
         dataframe = page_result.get("dataframe")
         if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+            page_num = page_result.get("page_number", "?")
+            raw = str(page_result.get("raw_text", "") or "")
+            if raw:
+                fallback_txns = _parse_raw_text_transactions(raw)
+                logger.info("Page %s dataframe empty — raw text fallback: %d transactions", page_num, len(fallback_txns))
+                structured_transactions.extend(fallback_txns)
+                if fallback_txns:
+                    last_balance = float(fallback_txns[-1].get("balance") or 0) or last_balance
             continue
-        structured_transactions.extend(parse_dataframe_transactions(dataframe, filename=pdf_path))
+        page_txns = parse_dataframe_transactions(dataframe, filename=pdf_path, seed_balance=last_balance)
+        structured_transactions.extend(page_txns)
+        if page_txns:
+            last_balance = float(page_txns[-1].get("balance") or 0) or last_balance
 
     print("parse_bank_pdf: dataframe path yielded %d transactions", len(structured_transactions))
 
@@ -231,7 +352,7 @@ def parse_bank_pdf(pdf_path: str) -> dict:
     }
 
 
-def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "") -> list[dict]:
+def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "", seed_balance: float | None = None) -> list[dict]:
     if df is None or df.empty:
         return []
 
@@ -266,7 +387,7 @@ def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "") -> list[d
         return []
 
     transactions: list[dict[str, Any]] = []
-    previous_balance: float | None = None
+    previous_balance: float | None = seed_balance
 
     def _cell_text(value: Any) -> str:
         if pd.isna(value):
@@ -279,6 +400,10 @@ def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "") -> list[d
         if not date_value:
             raw_date = str(row_dict.get(col_map["date"], "") or "").strip()
             if raw_date:
+                raw_date = re.split(r'\s{2,}', raw_date)[0].strip()
+                raw_date = re.sub(r'(\d{2}-\d{2})\s(\d{4})', r'\1-\2', raw_date)
+                # Handle "29-06-2022 29-06-2022" duplicate — take first date only
+                raw_date = re.split(r'\s+\d{2}[-/]\d{2}[-/]\d{2,4}', raw_date)[0].strip()
                 try:
                     parsed_dt = pd.to_datetime(raw_date, dayfirst=True, errors="coerce")
                     if pd.notna(parsed_dt):
@@ -286,7 +411,22 @@ def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "") -> list[d
                 except Exception:
                     pass
         if not date_value:
-            continue
+            desc_raw = str(row_dict.get(col_map.get("description", ""), "") or "").strip()
+            desc_clean = re.sub(r"[^\d\-/\s]", "0", desc_raw)
+            date_match = re.search(r"\b(\d{2}[-/]\d{2}[-/]\d{2,4})\b", desc_clean)
+            if date_match:
+                date_value = _normalize_date(date_match.group(1))
+                if not date_value:
+                    try:
+                        parsed_dt = pd.to_datetime(date_match.group(1), dayfirst=True, errors="coerce")
+                        date_value = parsed_dt.strftime("%Y-%m-%d") if pd.notna(parsed_dt) else None
+                    except Exception:
+                        pass
+        if not date_value:
+            if transactions:
+                date_value = transactions[-1]["date"]
+            else:
+                continue
 
         description = ""
         if "description" in col_map:
@@ -297,6 +437,18 @@ def parse_dataframe_transactions(df: pd.DataFrame, filename: str = "") -> list[d
 
         debit, credit, balance = resolve_debit_credit(row_dict, col_map, previous_balance)
         if debit == 0 and credit == 0 and balance == 0:
+            continue
+        if debit == 0 and credit == 0 and balance > 0:
+            transactions.append({
+                "date": date_value,
+                "description": description,
+                "debit": 0.0,
+                "credit": 0.0,
+                "balance": float(balance),
+                "ref_no": "",
+                "tags": {},
+            })
+            previous_balance = balance
             continue
 
         ref_no = ""

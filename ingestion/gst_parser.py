@@ -25,24 +25,32 @@ class GSTParser:
         return False
 
     def looks_like_gst_pdf(self, file_path: str) -> bool:
-        """Return True if a PDF looks like a GST invoice/export."""
+        """Return True if a PDF looks like a GST invoice with HSN/SAC line items."""
         gstin_pattern = re.compile(r"\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z0-9]", re.IGNORECASE)
-        keyword_tokens = ["CGST", "SGST", "IGST", "HSN", "SAC", "GSTIN", "TAX INVOICE"]
+        # Must have HSN or SAC to be a true GST invoice — regular invoices won't have these
+        required_tokens = {"HSN", "SAC"}
+        supporting_tokens = ["CGST", "SGST", "IGST", "GSTIN", "TAX INVOICE", "TAXABLE VALUE"]
 
         try:
-            import pdfplumber  # noqa: PLC0415
+            import pdfplumber
 
             gstin_found = False
-            keyword_hits = 0
+            required_hits = set()
+            supporting_hits = 0
+
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages[:2]:
                     text = page.extract_text() or ""
                     upper_text = text.upper()
                     if gstin_pattern.search(text):
                         gstin_found = True
-                    keyword_hits += sum(1 for token in keyword_tokens if token in upper_text)
+                    for token in required_tokens:
+                        if token in upper_text:
+                            required_hits.add(token)
+                    supporting_hits += sum(1 for token in supporting_tokens if token in upper_text)
 
-            return gstin_found and keyword_hits >= 2
+            # Must have GSTIN + at least one of HSN/SAC + 2 supporting tokens
+            return gstin_found and len(required_hits) >= 1 and supporting_hits >= 2
         except Exception:
             return False
 

@@ -102,7 +102,7 @@ def extract_image_pdf_full(file_path: str) -> list[dict[str, Any]]:
                     header_index = None
                     column_ranges = []
                     for strip_index, ocr_result in enumerate(strip_ocr):
-                        if strip_index > 12:
+                        if strip_index > 20:
                             break
                         candidate_ranges = build_column_ranges_from_ocr(ocr_result, page_width)
                         if len(candidate_ranges) >= 3:
@@ -778,16 +778,17 @@ def build_column_ranges_from_ocr(
         "remarks": "description", "txn remarks": "description",
         "descriplion": "description", "descripton": "description",
         "narralion": "description", "parliculars": "description",
+        "descriptlon": "description",
         "withdrawal": "debit", "withdrawl": "debit",
         "debit": "debit", "debit amount": "debit", "dr": "debit",
-        "debil": "debit",
+        "debil": "debit", "deblt": "debit",
         "deposit": "credit", "credit": "credit",
-        "credit amount": "credit", "cr": "credit", "credil": "credit",
+        "credit amount": "credit", "cr": "credit", "credil": "credit", "credlt": "credit",
         "balance": "balance", "closing": "balance", "running": "balance",
-        "balonce": "balance", "balancc": "balance",
+        "balonce": "balance", "balancc": "balance", "balonce": "balance",
         "ref": "ref", "chq": "ref", "cheque": "ref",
         "reference": "ref", "chq/ref": "ref", "ref no": "ref",
-        "cheque no": "ref", "rel cheque": "ref", "rel": "ref",
+        "cheque no": "ref", "rel cheque": "ref", "rel": "ref", "serlal": "ref", "number": "ref",
         "amount": "amount", "txn amount": "amount",
     }
 

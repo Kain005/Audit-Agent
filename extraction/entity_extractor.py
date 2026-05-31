@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pydoc import text
 import re
 from pathlib import Path
 from typing import Any
@@ -101,8 +102,8 @@ class EntityExtractor:
         else:
             self.nlp = self._load_default_spacy_model()
 
-        self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-        self.ollama_model = os.environ.get("OLLAMA_MODEL", "llama3.1")
+        self.ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+        self.ollama_model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 
     def _load_default_spacy_model(self) -> Any:
         try:
@@ -216,7 +217,10 @@ class EntityExtractor:
         return grouped
 
     def extract_with_llm(self, text: str, doc_type: str) -> dict[str, Any]:
+        print(f"DEBUG extract_with_llm ENTRY", flush=True)
+        print(f"DEBUG extract_with_llm ENTRY doc_type={doc_type} text_len={len(text or '')}", flush=True)
         """Call Ollama for context-aware extraction. Returns empty dict on failure."""
+        truncated_text = text[:1500] if text else ""  # ~375 tokens, enough for header fields
         prompt = (
             "You are an information extraction assistant. "
             f"Document type: {doc_type}. "
@@ -224,7 +228,7 @@ class EntityExtractor:
             "vendor_name (string or null), payment_terms (string or null), "
             "line_item_descriptions (array of strings).\n\n"
             "Text:\n"
-            f"{text}"
+            f"{truncated_text}"
         )
 
         payload = {
@@ -238,7 +242,7 @@ class EntityExtractor:
             response = requests.post(
                 f"{self.ollama_url.rstrip('/')}/api/generate",
                 json=payload,
-                timeout=20,
+                timeout=120,
             )
             response.raise_for_status()
             body = response.json()
@@ -249,18 +253,24 @@ class EntityExtractor:
 
             try:
                 parsed = json.loads(llm_text)
+                print(f"DEBUG LLM extraction result: {parsed}", flush=True)
+
+
                 return parsed if isinstance(parsed, dict) else {}
             except json.JSONDecodeError:
                 json_text = self._extract_json_object(llm_text)
                 if not json_text:
                     return {}
                 parsed = json.loads(json_text)
+                print(f"DEBUG LLM extraction result: {parsed}", flush=True)  # ADD HERE
+
                 return parsed if isinstance(parsed, dict) else {}
         except Exception as exc:
-            LOGGER.warning("Ollama extraction failed, continuing without LLM: %s", exc)
+            print(f"DEBUG Ollama extraction failed, continuing without LLM: {exc}", flush=True)
             return {}
 
     def extract_invoice_entities(self, text: str) -> InvoiceEntities:
+        print(f"DEBUG extract_invoice_entities called: text_len={len(text or '')}", flush=True)
         """Run all extractors and merge output into typed invoice entities."""
         source = text or ""
 

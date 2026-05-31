@@ -166,11 +166,15 @@ class AnomalyDetector:
         grouped = data.groupby(category_col, dropna=False)
 
         for category, group in grouped:
-            if len(group) < 3:
+            # Need at least 5 rows — z-score is statistically meaningless on smaller groups
+            if len(group) < 5:
                 continue
 
             amounts = group["amount"].astype(float)
-            if amounts.nunique() <= 1:
+            nonzero_amounts = amounts[amounts > 0]
+            if len(nonzero_amounts) < 5:
+                continue
+            if nonzero_amounts.nunique() <= 1:
                 continue
 
             z_scores = np.abs(stats.zscore(amounts, nan_policy="omit"))
@@ -179,18 +183,34 @@ class AnomalyDetector:
             iqr = q3 - q1
             iqr_threshold = q3 + (3 * iqr)
 
+            # Scale z-threshold with N — small samples need a higher bar to avoid false positives
+            n = len(amounts)
+            z_threshold = 3.0 if n >= 30 else (3.5 if n >= 15 else 4.0)
+
             for idx, row in group.iterrows():
                 z = float(z_scores[group.index.get_loc(idx)]) if not np.isnan(z_scores[group.index.get_loc(idx)]) else 0.0
                 amount = float(row["amount"])
 
-                z_flag = z > 3
+                z_flag = z > z_threshold
                 iqr_flag = amount > iqr_threshold
 
                 if not z_flag and not iqr_flag:
                     continue
 
-                severity = "HIGH" if z >4 else "MEDIUM"
+                severity = "HIGH" if z > (z_threshold + 1.0) else "MEDIUM"
                 score = min(1.0, max(0.0, z / 6.0)) if z_flag else 0.7
+
+                method_used = (
+                    "z-score and IQR" if z_flag and iqr_flag
+                    else "z-score" if z_flag
+                    else "IQR"
+                )
+                typical = round(float(nonzero_amounts.median()), 2)
+                multiplier = round(amount / typical, 1) if typical > 0 else None
+                multiplier_text = f" — {multiplier}x the typical ₹{typical:,.0f} for this account" if multiplier else ""
+
+                description = str(row.get("description", "")).strip()
+                desc_text = f" | {description[:60]}" if description and description != "Unknown" else ""
 
                 findings.append(
                     self._build_finding(
@@ -205,10 +225,11 @@ class AnomalyDetector:
                             "iqr_threshold": round(float(iqr_threshold), 2),
                             "z_method_flag": z_flag,
                             "iqr_method_flag": iqr_flag,
+                            "typical_amount": typical,
+                            "multiplier": multiplier,
                         },
                         reason=(
-                            "Transaction amount is anomalous within category based on "
-                            f"{'z-score' if z_flag else ''}{' and ' if z_flag and iqr_flag else ''}{'IQR' if iqr_flag else ''}."
+                            f"₹{amount:,.0f} is anomalous ({method_used}){multiplier_text}{desc_text}"
                         ),
                     )
                 )
@@ -247,6 +268,8 @@ class AnomalyDetector:
 
         for _, row in data.iterrows():
             txn_date = row["parsed_date"]
+            if pd.isna(txn_date):
+                continue
             day_name = txn_date.strftime("%A")
             hour = int(txn_date.hour)
             amount = float(row["amount"])
@@ -329,6 +352,13 @@ class AnomalyDetector:
         )
 
         for vendor, current_count in current_counts.items():
+            # Require at least 2 prior months of data to have a meaningful baseline
+            prior_months = monthly_counts[
+                (monthly_counts["vendor_key"] == vendor) & (monthly_counts["year_month"] != current_month)
+            ]
+            if len(prior_months) < 2:
+                continue
+
             mean_count = float(vendor_stats.loc[vendor, "mean"])
             std_count = float(vendor_stats.loc[vendor, "std"])
             threshold_medium = mean_count + (2 * std_count)
@@ -406,7 +436,7 @@ class AnomalyDetector:
                     continue
 
                 combined_amount = float(sum(amounts))
-                rows_df = pd.DataFrame(window_rows)
+                rows_df = pd.DataFrame([r._asdict() for r in window_rows])
                 count = len(window_rows)
                 days = split_rules.within_days
                 total = combined_amount
@@ -444,7 +474,13 @@ class AnomalyDetector:
 
         findings: list[AnomalyFinding] = []
 
-        if len(data) < 10:
+        if len(data) < 20:
+            return findings
+
+        # Skip trivially small amounts — not worth flagging as multivariate anomalies
+        min_amount_threshold = float(data["amount"].quantile(0.25))
+        data = data[data["amount"] >= max(min_amount_threshold, 500.0)].copy()
+        if len(data) < 20:
             return findings
 
         vendor_col = self._resolve_vendor_column(data)
@@ -478,23 +514,31 @@ class AnomalyDetector:
             severity = "HIGH" if magnitude > 0.25 else "MEDIUM"
             score = min(1.0, 0.55 + magnitude)
 
+            day_name = row["parsed_date"].strftime("%A")
+            vendor_val = str(row.get(vendor_col, "unknown")).strip()[:40]
+            freq = int(vendor_frequency.get(str(row.get(vendor_col, "unknown")), 1))
+            amt = float(row["amount"])
+
             findings.append(
-                self._build_finding(
-                    row=row,
-                    finding_type="multivariate_anomaly",
-                    severity=severity,
-                    score=score,
-                    evidence={
-                        "anomaly_score": round(float(raw_score), 5),
-                        "score_magnitude": round(magnitude, 5),
-                        "amount": float(row["amount"]),
-                        "hour": int(row["parsed_date"].hour),
-                        "day_of_week": int(row["parsed_date"].weekday()),
-                        "vendor_frequency": int(vendor_frequency.get(str(row.get(vendor_col, "unknown")), 1)),
-                    },
-                    reason="Transaction deviates from multivariate behavioral baseline.",
+                    self._build_finding(
+                        row=row,
+                        finding_type="multivariate_anomaly",
+                        severity=severity,
+                        score=score,
+                        evidence={
+                            "anomaly_score": round(float(raw_score), 5),
+                            "score_magnitude": round(magnitude, 5),
+                            "amount": amt,
+                            "hour": int(row["parsed_date"].hour),
+                            "day_of_week": int(row["parsed_date"].weekday()),
+                            "vendor_frequency": freq,
+                        },
+                        reason=(
+                            f"₹{amt:,.0f} on {day_name} via '{vendor_val}' — unusual combination of "
+                            f"amount, timing, and frequency (appears {freq}x in statement)"
+                        ),
+                    )
                 )
-            )
 
         return findings
 
@@ -505,7 +549,13 @@ class AnomalyDetector:
             return findings
 
         data = expense_df.copy()
-        data["expense_date"] = pd.to_datetime(data.get("date"), dayfirst=True, errors="coerce")
+        data["expense_date"] = data.get("date").apply(
+            lambda v: pd.to_datetime(v, dayfirst=True, errors="coerce") if pd.notna(v) else pd.NaT
+        )
+        # If still NaT, try the already-parsed date column from ExpenseParser
+        if "expense_date" in data.columns:
+            already_parsed = pd.to_datetime(data.get("date"), errors="coerce")
+            data["expense_date"] = data["expense_date"].fillna(already_parsed)
         data["amount_value"] = pd.to_numeric(
             data.get("amount", pd.Series(index=data.index, dtype=object)).astype(str).str.replace(",", "", regex=False),
             errors="coerce",
@@ -631,21 +681,22 @@ class AnomalyDetector:
 
         same_day_groups = valid_dates.groupby(["submitted_by_key", "expense_day"], dropna=False)
         for (employee, expense_day), group in same_day_groups:
-            if len(group) < 2:
+            # 2 expenses on same day is normal (e.g. meal + cab) — need 3+ to flag
+            if len(group) < 3:
                 continue
             findings.append(
                 self._build_group_finding(
                     rows=group,
                     finding_type="expense_policy_possible_split",
-                    severity="HIGH" if len(group) >= 3 else "MEDIUM",
-                    score=0.78 if len(group) >= 3 else 0.68,
+                    severity="HIGH" if len(group) >= 4 else "MEDIUM",
+                    score=0.82 if len(group) >= 4 else 0.68,
                     evidence={
                         "submitted_by": employee,
                         "expense_day": str(expense_day),
                         "expense_count": len(group),
                         "total_amount": float(group["amount_value"].fillna(0).sum()),
                     },
-                    reason="Multiple expenses submitted by same employee on same day, possible splitting.",
+                    reason=f"{len(group)} expenses by same employee on same day — possible bill splitting.",
                 )
             )
 

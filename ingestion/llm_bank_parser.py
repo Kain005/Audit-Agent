@@ -45,14 +45,31 @@ Bank statement text:
 
 def _call_gemini(prompt: str, api_key: str) -> str:
     from google import genai  # noqa: PLC0415
+    import httpx
 
+    print(f"[Gemini] Sending request to model: {GEMINI_MODEL}")
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config={"temperature": 0},
-    )
-    return response.text.strip()
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"temperature": 0},
+        )
+        print(f"[Gemini] Response received — {len(response.text.strip())} chars")
+        return response.text.strip()
+    except Exception as exc:
+        status = None
+        if hasattr(exc, "status_code"):
+            status = exc.status_code
+        elif hasattr(exc, "code"):
+            status = exc.code
+        elif hasattr(exc, "response") and hasattr(exc.response, "status_code"):
+            status = exc.response.status_code
+        if status:
+            print(f"[Gemini] HTTP Error {status} — {exc}")
+        else:
+            print(f"[Gemini] Error — {type(exc).__name__}: {exc}")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +267,7 @@ def parse_image_pdf_with_llm(
             all_rows = _parse_llm_rows(raw_response, bank_name)
             logger.info("LLM bank parser: parsed %d rows from Gemini response", len(all_rows))
         except Exception as exc:
+            print(f"[Gemini] Call failed — falling back to heuristic. Reason: {exc}")
             logger.error("LLM bank parser: Gemini call failed: %s — falling back to heuristic", exc)
             all_rows = _heuristic_parse(full_text, bank_name)
 

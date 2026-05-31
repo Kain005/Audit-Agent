@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 from pathlib import Path
+import pandas as pd
 import re
 import uuid
 from collections import defaultdict
@@ -309,7 +310,17 @@ class RulesEngine:
 
         expense_date = self._parse_date(str(payload.get("date") or ""))
         if expense_date is None:
-            expense_date = datetime.utcnow()
+            # Try pandas as fallback before giving up
+            try:
+                expense_date = pd.to_datetime(payload.get("date"), dayfirst=True, errors="coerce")
+                if pd.isna(expense_date):
+                    expense_date = None
+                else:
+                    expense_date = expense_date.to_pydatetime()
+            except Exception:
+                expense_date = None
+        if expense_date is None:
+            return None  # skip check entirely rather than use wrong date
 
         category_daily_limits = self._rule_map(
             rules,
